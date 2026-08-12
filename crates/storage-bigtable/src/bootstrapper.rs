@@ -90,7 +90,10 @@ impl Bootstrapper for BigtableBootstrapper {
     }
 
     async fn create_data_db(&self) -> OpResult<()> {
-        // Per-data-table creation happens in CreateTable, not at bootstrap.
+        let client = self.client().await?;
+        let mut admin = AdminClient::connect(client).await.map_err(OpError::Internal)?;
+        let _ = admin.create_table(crate::transact::TXN_LOG_TABLE, &[(crate::transact::TXN_FAMILY, None)]).await;
+        let _ = admin.create_table(crate::data::encoding::ttl_key::TTL_INDEX_TABLE, &[("d", None)]).await;
         Ok(())
     }
 

@@ -55,7 +55,7 @@ pub async fn run(engine: Arc<BigtableEngine>, cadence: Duration) {
     }
 }
 
-async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
+pub async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -69,7 +69,7 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
     Ok(())
 }
 
-async fn sweep_shard(
+pub async fn sweep_shard(
     engine: &BigtableEngine,
     shard_id: u8,
     now_epoch_s: i64,

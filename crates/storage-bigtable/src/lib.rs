@@ -24,6 +24,7 @@ pub mod sweeper;
 pub mod transact;
 pub mod ttl_worker;
 pub use catalog_store::{BigtableCatalogStore, BigtableCredentialStore};
+pub use data::client::BigtableClient;
 pub use engine::BigtableEngine;
 
 pub fn backend() -> extenddb_storage::Backend {

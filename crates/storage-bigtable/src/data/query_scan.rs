@@ -243,7 +243,7 @@ impl<'a> QueryScan<'a> {
             filter: Some(RowFilter {
                 filter: Some(Filter::CellsPerColumnLimitFilter(1)),
             }),
-            reversed: !forward,
+            reversed: false,
             ..ReadRowsRequest::default()
         };
         let resp = data
@@ -255,6 +255,13 @@ impl<'a> QueryScan<'a> {
         for (_key, cells) in resp {
             if let Some(item) = Self::cells_to_item(cells)? {
                 items.push(item);
+            }
+        }
+
+        if !forward {
+            items.reverse();
+            if let Some(l) = limit {
+                items.truncate(l as usize);
             }
         }
 

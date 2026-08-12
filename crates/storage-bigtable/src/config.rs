@@ -197,7 +197,7 @@ impl BigtableStorageConfig {
 
 impl StorageConfig for BigtableStorageConfig {
     fn connection_config(&self) -> &str {
-        Box::leak(self.connection_string().into_boxed_str())
+        &self.project_id
     }
 
     fn max_connections(&self) -> u32 {

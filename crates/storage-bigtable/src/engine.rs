@@ -1238,10 +1238,19 @@ impl DataEngine for BigtableEngine {
             let total_ops = owned.len();
             let mut out: Vec<Option<Item>> = vec![None; total_ops];
             
-            // Group by data_table to batch.
-            let mut grouped: std::collections::HashMap<String, Vec<(usize, TableKeyInfo, Item)>> = std::collections::HashMap::new();
-            for (idx, (key_info, key)) in owned.into_iter().enumerate() {
-                let data_table = self.data_table_for(&key_info).await?;
+            // Group by data_table to batch with concurrent metadata resolution.
+            let resolve_futures = owned
+                .into_iter()
+                .enumerate()
+                .map(|(idx, (key_info, key))| async move {
+                    let data_table = self.data_table_for(&key_info).await?;
+                    Ok::<_, StorageError>((idx, data_table, key_info, key))
+                });
+            let resolved_ops = futures::future::try_join_all(resolve_futures).await?;
+
+            let mut grouped: std::collections::HashMap<String, Vec<(usize, TableKeyInfo, Item)>> =
+                std::collections::HashMap::new();
+            for (idx, data_table, key_info, key) in resolved_ops {
                 grouped.entry(data_table).or_default().push((idx, key_info, key));
             }
 
@@ -1393,10 +1402,8 @@ impl DataEngine for BigtableEngine {
                 }
             }
 
-            // Phase 1: per-op metadata resolution & key encoding (no DB reads yet).
-            let mut resolved: Vec<(OwnedTxnOp, String, TableDescription, Option<String>, crate::transact::ParticipantRow)> =
-                Vec::with_capacity(owned.len());
-            for op in owned {
+            // Phase 1: per-op metadata resolution & key encoding concurrently (no DB reads yet).
+            let resolve_futures = owned.into_iter().map(|op| async move {
                 let (data_table, desc, ttl_attr) = self.table_full_meta_for(&op.key_info).await?;
                 let row_key = crate::data::encoding::row_key::encode_key(
                     op.lookup_key(),
@@ -1406,8 +1413,10 @@ impl DataEngine for BigtableEngine {
                     data_table: data_table.clone(),
                     row_key,
                 };
-                resolved.push((op, data_table, desc, ttl_attr, participant));
-            }
+                Ok::<_, StorageError>((op, data_table, desc, ttl_attr, participant))
+            });
+            let resolved: Vec<(OwnedTxnOp, String, TableDescription, Option<String>, crate::transact::ParticipantRow)> =
+                futures::future::try_join_all(resolve_futures).await?;
 
             // Phase 2: Open coordinator row in PENDING.
             let mut participants = Vec::with_capacity(resolved.len());
