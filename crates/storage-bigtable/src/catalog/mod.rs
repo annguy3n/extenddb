@@ -209,7 +209,7 @@ impl<'c> Catalog<'c> {
                         RowFilter {
                             filter: Some(Filter::TimestampRangeFilter(TimestampRange {
                                 start_timestamp_micros: now_micros,
-                                end_timestamp_micros: 0,
+                                end_timestamp_micros: i64::MAX,
                             })),
                         },
                     ],

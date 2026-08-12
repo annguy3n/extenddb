@@ -175,7 +175,7 @@ impl<'a> ItemOps<'a> {
                         RowFilter {
                             filter: Some(Filter::TimestampRangeFilter(TimestampRange {
                                 start_timestamp_micros: min_timestamp,
-                                end_timestamp_micros: 0,
+                                end_timestamp_micros: i64::MAX,
                             })),
                         },
                     ],
@@ -241,7 +241,7 @@ impl<'a> ItemOps<'a> {
                         RowFilter {
                             filter: Some(Filter::TimestampRangeFilter(TimestampRange {
                                 start_timestamp_micros: min_timestamp,
-                                end_timestamp_micros: 0,
+                                end_timestamp_micros: i64::MAX,
                             })),
                         },
                     ],

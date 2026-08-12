@@ -448,6 +448,10 @@ impl<'a> QueryScan<'a> {
             None => Vec::new(),
         };
 
+        let total = total_segments.unwrap_or(1).max(1) as u64;
+        let seg = segment.unwrap_or(0).max(0) as u64 % total;
+        let is_parallel = total > 1;
+
         let mut data = self.client.data();
         let req = ReadRowsRequest {
             table_name: self.full_table_name.clone(),
@@ -458,7 +462,7 @@ impl<'a> QueryScan<'a> {
                     end_key: None,
                 }],
             }),
-            rows_limit: limit.unwrap_or(0),
+            rows_limit: if is_parallel { 0 } else { limit.unwrap_or(0) },
             filter: Some(RowFilter {
                 filter: Some(Filter::CellsPerColumnLimitFilter(1)),
             }),
@@ -469,18 +473,21 @@ impl<'a> QueryScan<'a> {
             .await
             .map_err(|e| StorageError::Internal(format!("Scan ReadRows: {e}")))?;
 
-        let total = total_segments.unwrap_or(1).max(1) as u64;
-        let seg = segment.unwrap_or(0).max(0) as u64 % total;
-
         let mut items: Vec<Item> = Vec::with_capacity(resp.len());
         let mut last_key: Option<Vec<u8>> = None;
+        let limit_val = limit.map(|l| l as usize);
         for (raw_key, cells) in resp {
-            if total > 1 && hash_segment(&raw_key, total) != seg {
+            if is_parallel && hash_segment(&raw_key, total) != seg {
                 continue;
             }
             if let Some(item) = Self::cells_to_item(cells)? {
                 items.push(item);
                 last_key = Some(raw_key);
+                if let Some(l) = limit_val {
+                    if items.len() == l {
+                        break;
+                    }
+                }
             }
         }
 

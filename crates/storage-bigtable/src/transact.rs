@@ -402,7 +402,7 @@ fn build_intent_presence_filter(cutoff_micros: i64) -> RowFilter {
                 RowFilter {
                     filter: Some(Filter::TimestampRangeFilter(TimestampRange {
                         start_timestamp_micros: cutoff_micros.max(0),
-                        end_timestamp_micros: 0, // 0 = unbounded
+                        end_timestamp_micros: i64::MAX,
                     })),
                 },
                 RowFilter {

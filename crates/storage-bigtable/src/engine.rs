@@ -1287,16 +1287,16 @@ impl DataEngine for BigtableEngine {
         ops: &[TransactWriteOp<'_>],
         token: Option<extenddb_storage::IdempotencyKey<'_>>,
     ) -> BoxFuture<'_, Result<(), StorageError>> {
-        let token = token.map(|k| (k.token.to_owned(), k.fingerprint.to_owned()));
+        let token = token.map(|k| (k.account_id.to_owned(), k.token.to_owned(), k.fingerprint.to_owned()));
         let owned: Vec<OwnedTxnOp> = ops.iter().map(OwnedTxnOp::from).collect();
         Box::pin(async move {
             use std::time::Duration;
 
             // Pre-check ClientRequestToken idempotency.
-            if let Some((tok, fp)) = &token {
+            if let Some((acct, tok, fp)) = &token {
                 if let Some(prior) = self
                     .cat()
-                    .get(&keys::idempotency(tok))
+                    .get(&keys::idempotency(acct, tok))
                     .await
                     .map_err(StorageError::Internal)?
                 {
@@ -1310,7 +1310,7 @@ impl DataEngine for BigtableEngine {
             }
 
             let intent_max_age = Duration::from_secs(60);
-            let txn_id = if let Some((tok, _)) = &token {
+            let txn_id = if let Some((_, tok, _)) = &token {
                 derive_txn_id(tok)
             } else {
                 crate::transact::TxnCoordinator::new_txn_id()
@@ -1321,23 +1321,23 @@ impl DataEngine for BigtableEngine {
                 if let Some(txn_state) = coord.get_state(&txn_id).await? {
                     match txn_state.state.as_str() {
                         "CLEANED" => {
-                            if let Some((tok, fp)) = &token {
+                            if let Some((acct, tok, fp)) = &token {
                                 let record = json!({
                                     "fingerprint": fp,
                                     "txn_id": txn_id,
                                 });
-                                let _ = self.cat().put(&keys::idempotency(tok), &record).await;
+                                let _ = self.cat().put(&keys::idempotency(acct, tok), &record).await;
                             }
                             return Ok(());
                         }
                         "COMMITTED" => {
                             self.roll_forward(&txn_id, &txn_state).await?;
-                            if let Some((tok, fp)) = &token {
+                            if let Some((acct, tok, fp)) = &token {
                                 let record = json!({
                                     "fingerprint": fp,
                                     "txn_id": txn_id,
                                 });
-                                let _ = self.cat().put(&keys::idempotency(tok), &record).await;
+                                let _ = self.cat().put(&keys::idempotency(acct, tok), &record).await;
                             }
                             return Ok(());
                         }
@@ -1374,9 +1374,9 @@ impl DataEngine for BigtableEngine {
                                     }
                                 } else {
                                     // Row disappeared. Check if token was written.
-                                    if let Some((tok, _)) = &token {
-                                        if self.cat().get(&keys::idempotency(tok)).await.map_err(StorageError::Internal)?.is_some() {
-                                            break;
+                                    if let Some((acct, tok, _)) = &token {
+                                        if self.cat().get(&keys::idempotency(acct, tok)).await.map_err(StorageError::Internal)?.is_some() {
+                                             break;
                                         }
                                     }
                                     return Err(StorageError::TransactionConflict(
@@ -1384,12 +1384,12 @@ impl DataEngine for BigtableEngine {
                                     ));
                                 }
                             }
-                            if let Some((tok, fp)) = &token {
+                            if let Some((acct, tok, fp)) = &token {
                                 let record = json!({
                                     "fingerprint": fp,
                                     "txn_id": txn_id,
                                 });
-                                let _ = self.cat().put(&keys::idempotency(tok), &record).await;
+                                let _ = self.cat().put(&keys::idempotency(acct, tok), &record).await;
                             }
                             return Ok(());
                         }
@@ -1417,6 +1417,16 @@ impl DataEngine for BigtableEngine {
             });
             let resolved: Vec<(OwnedTxnOp, String, TableDescription, Option<String>, crate::transact::ParticipantRow)> =
                 futures::future::try_join_all(resolve_futures).await?;
+
+            // Reject transactions with duplicate participant items upfront.
+            let mut seen_items = std::collections::HashSet::new();
+            for (_, _, _, _, p) in &resolved {
+                if !seen_items.insert((p.data_table.clone(), p.row_key.clone())) {
+                    return Err(StorageError::Validation(
+                        "Cannot perform multiple operations on one item in every TransactWriteItems call".to_string(),
+                    ));
+                }
+            }
 
             // Phase 2: Open coordinator row in PENDING.
             let mut participants = Vec::with_capacity(resolved.len());
@@ -1736,12 +1746,12 @@ impl DataEngine for BigtableEngine {
             let _ = coord.drop(&txn_id).await;
 
             // Record the token + fingerprint for dedup.
-            if let Some((tok, fp)) = &token {
+            if let Some((acct, tok, fp)) = &token {
                 let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
                 let _ = self
                     .cat()
                     .put(
-                        &keys::idempotency(tok),
+                        &keys::idempotency(acct, tok),
                         &serde_json::json!({
                             "fingerprint": fp,
                             "applied_at": now_secs,

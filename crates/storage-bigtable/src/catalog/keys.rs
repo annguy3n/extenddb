@@ -44,9 +44,9 @@ pub fn tags(arn: &str) -> String {
     format!("tags:{arn}")
 }
 
-/// ClientRequestToken dedup record for TransactWriteItems.
-pub fn idempotency(token: &str) -> String {
-    format!("idem:{token}")
+/// ClientRequestToken dedup record for TransactWriteItems (scoped per account).
+pub fn idempotency(account_id: &str, token: &str) -> String {
+    format!("idem:{account_id}:{token}")
 }
 
 /// Prefix for scanning expired idempotency records (used by cleanup worker).
