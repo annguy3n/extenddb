@@ -142,7 +142,7 @@ pub async fn sweep_shard(
                 continue;
             }
 
-            let key_info = match TableEngine::table_key_info(engine, &account_id, &table_name).await {
+            let key_info = match TableEngine::table_key_info(engine, account_id, table_name).await {
                 Ok(ki) => ki,
                 Err(e) => {
                     tracing::warn!("could not fetch key info for table {account_id}/{table_name}: {e}");
@@ -151,7 +151,7 @@ pub async fn sweep_shard(
                 }
             };
 
-            let base_key = match crate::data::encoding::row_key::decode_key(&base_row_key, &key_info.key_schema) {
+            let base_key = match crate::data::encoding::row_key::decode_key(base_row_key, &key_info.key_schema) {
                 Ok(k) => k,
                 Err(e) => {
                     tracing::warn!("failed to decode base row key for table {account_id}/{table_name}: {e}");
@@ -159,6 +159,29 @@ pub async fn sweep_shard(
                     continue;
                 }
             };
+
+            // Fetch live base item to verify TTL has not been extended to the future.
+            let live_item = match DataEngine::get_item(engine, &key_info, &base_key).await {
+                Ok(Some(item)) => item,
+                Ok(None) => {
+                    // Base item already deleted. Clean up stale TTL index entry.
+                    let _ = delete_ttl_index_entry_raw(engine, &raw_key).await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to get live base item for TTL check: {e}");
+                    continue;
+                }
+            };
+
+            // If table has TTL configured and live TTL is greater than current time, skip deleting base item.
+            if let Ok((_, _, Some(attr_name))) = engine.table_full_meta_for(&key_info).await
+                && let Some(live_expiry) = crate::engine::get_ttl_expiry(&live_item, &attr_name)
+                && live_expiry > now_epoch_s {
+                    // TTL extended in base row; delete only this stale index entry.
+                    let _ = delete_ttl_index_entry_raw(engine, &raw_key).await;
+                    continue;
+            }
 
             let maps = extenddb_core::expression::ExpressionMaps::default();
             match DataEngine::delete_item(

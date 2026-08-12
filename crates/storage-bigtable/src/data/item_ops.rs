@@ -139,6 +139,61 @@ impl<'a> ItemOps<'a> {
         Ok(out)
     }
 
+    /// Read multiple rows into Item maps using pre-encoded raw row keys.
+    pub async fn batch_get_by_raw_keys(
+        &self,
+        row_keys: &[Vec<u8>],
+    ) -> Result<Vec<Option<Item>>, StorageError> {
+        if row_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut data = self.client.data();
+        let req = ReadRowsRequest {
+            table_name: self.full_table_name.clone(),
+            rows_limit: row_keys.len() as i64,
+            rows: Some(RowSet {
+                row_keys: row_keys.to_vec(),
+                row_ranges: vec![],
+            }),
+            filter: Some(RowFilter {
+                filter: Some(Filter::CellsPerColumnLimitFilter(1)),
+            }),
+            ..ReadRowsRequest::default()
+        };
+        let resp = data
+            .read_rows(req)
+            .await
+            .map_err(|e| StorageError::Internal(format!("ReadRows batch raw: {e}")))?;
+
+        let mut row_map = BTreeMap::new();
+        for (rkey, cells) in resp {
+            let mut item: Item = BTreeMap::new();
+            for c in cells {
+                if c.family_name == FAMILY_DATA {
+                    let attr_name = String::from_utf8(c.qualifier).map_err(|e| {
+                        StorageError::Internal(format!("decode qualifier: {e}"))
+                    })?;
+                    let value = cell::decode(&c.value)?;
+                    item.insert(attr_name, value);
+                }
+            }
+            if !item.is_empty() {
+                row_map.insert(rkey, item);
+            }
+        }
+
+        let mut out = Vec::with_capacity(row_keys.len());
+        for rkey in row_keys {
+            if let Some(item) = row_map.get(rkey) {
+                out.push(Some(item.clone()));
+            } else {
+                out.push(None);
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Guarded Put: write the item only if there is no active 2PC lock.
     /// Uses DeleteFromFamily(d) to preserve family m.
     pub async fn put(

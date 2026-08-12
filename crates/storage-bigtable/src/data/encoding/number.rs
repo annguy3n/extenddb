@@ -141,7 +141,7 @@ pub fn decode(bytes: &[u8]) -> Result<String, StorageError> {
         let exp = ((0xFF - biased_exp) as i32) - EXP_BIAS;
         let mut digs = Vec::with_capacity(MANTISSA_DIGITS);
         for &b in &bytes[2..] {
-            let digit = if b <= 9 { 9 - b } else { 0 };
+            let digit = 9_u8.saturating_sub(b);
             digs.push(digit + b'0');
         }
         (false, exp, digs)
@@ -166,7 +166,7 @@ pub fn decode(bytes: &[u8]) -> Result<String, StorageError> {
         .map_err(|e| StorageError::Internal(format!("invalid UTF-8 in numeric digits: {e}")))?;
     let final_exp = exp - (sig_len as i32) + 1;
     if final_exp == 0 {
-        out_str.push_str(&sig_digits_str);
+        out_str.push_str(sig_digits_str);
     } else {
         out_str.push_str(&format!("{sig_digits_str}e{final_exp}"));
     }

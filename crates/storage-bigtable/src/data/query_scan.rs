@@ -273,6 +273,7 @@ impl<'a> QueryScan<'a> {
     }
 
     /// Run a Query against a Local Secondary Index.
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_lsi(
         &self,
         base_key_info: &TableKeyInfo,
@@ -347,11 +348,10 @@ impl<'a> QueryScan<'a> {
 
         let mut items: Vec<Item> = Vec::with_capacity(resp.len());
         for (_raw_key, cells) in resp {
-            if let Some(item) = Self::cells_to_item(cells)? {
-                if item.contains_key(&lsi_sk_name) {
+            if let Some(item) = Self::cells_to_item(cells)?
+                && item.contains_key(&lsi_sk_name) {
                     items.push(item);
                 }
-            }
         }
 
         // Sort by LSI sort key.
@@ -483,11 +483,10 @@ impl<'a> QueryScan<'a> {
             if let Some(item) = Self::cells_to_item(cells)? {
                 items.push(item);
                 last_key = Some(raw_key);
-                if let Some(l) = limit_val {
-                    if items.len() == l {
+                if let Some(l) = limit_val
+                    && items.len() == l {
                         break;
                     }
-                }
             }
         }
 
@@ -520,6 +519,7 @@ fn hash_segment(key: &[u8], total: u64) -> u64 {
 }
 
 /// Filter items by a KeyCondition's sort-key clause.
+#[allow(clippy::type_complexity)]
 fn filter_items_by_sk_condition(
     items: Vec<Item>,
     sk_name: &str,

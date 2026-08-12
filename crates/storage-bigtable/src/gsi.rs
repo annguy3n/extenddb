@@ -135,13 +135,12 @@ pub fn project_for_shadow(
     for ks in gsi_key_schema {
         copy_named(&ks.attribute_name);
     }
-    if matches!(projection.projection_type, ProjectionType::Include) {
-        if let Some(extras) = &projection.non_key_attributes {
+    if matches!(projection.projection_type, ProjectionType::Include)
+        && let Some(extras) = &projection.non_key_attributes {
             for name in extras {
                 copy_named(name);
             }
         }
-    }
     out
 }
 

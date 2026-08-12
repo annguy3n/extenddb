@@ -203,7 +203,7 @@ async fn reconcile_gsi_shadow_to_base(
         let base_rows = base_ops.batch_get(base_key_info, &base_keys).await
             .map_err(|e| format!("batch get base rows: {e}"))?;
 
-        for (shadow_item, base_row) in items.into_iter().zip(base_rows.into_iter()) {
+        for (shadow_item, base_row) in items.into_iter().zip(base_rows) {
             if let Err(e) = reconcile_shadow_item_with_base(
                 &shadow_ops,
                 base_key_info,
@@ -234,7 +234,7 @@ async fn reconcile_gsi_base_to_shadow(
     let shadow_table = crate::gsi::shadow_table_id(data_table, &gsi.index_name);
     let shadow_ops = ItemOps::new(engine.client_ref(), &shadow_table, 0);
 
-    let shadow_key_info = TableKeyInfo {
+    let _shadow_key_info = TableKeyInfo {
         table_name: format!("{}__gsi_{}", base_key_info.table_name, gsi.index_name),
         account_id: base_key_info.account_id.clone(),
         table_id: format!("{}::{}", base_key_info.table_id, gsi.index_name),
@@ -281,11 +281,11 @@ async fn reconcile_gsi_base_to_shadow(
         }).collect();
 
         if !targets.is_empty() {
-            let keys_to_get: Vec<Item> = targets.iter().map(|(_, proj, _)| proj.clone()).collect();
-            let existing_shadows = shadow_ops.batch_get(&shadow_key_info, &keys_to_get).await
+            let raw_keys: Vec<Vec<u8>> = targets.iter().map(|(_, _, key)| key.clone()).collect();
+            let existing_shadows = shadow_ops.batch_get_by_raw_keys(&raw_keys).await
                 .map_err(|e| format!("batch get shadow rows: {e}"))?;
 
-            for ((_base_item, expected_projected, key), existing_shadow) in targets.into_iter().zip(existing_shadows.into_iter()) {
+            for ((_base_item, expected_projected, key), existing_shadow) in targets.into_iter().zip(existing_shadows) {
                 match existing_shadow {
                     None => {
                         let mutations = shadow_ops.item_to_mutations(&expected_projected, true)

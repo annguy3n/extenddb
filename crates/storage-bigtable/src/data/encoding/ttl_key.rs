@@ -32,9 +32,9 @@ pub fn encode_ttl_key(
 
 /// Decode a TTL index row key back into its components.
 /// Returns (shard_id, expiry, account_id, table_name, base_row_key)
-pub fn decode_ttl_key<'a>(
-    key: &'a [u8],
-) -> Result<(u8, i64, &'a str, &'a str, &'a [u8]), StorageError> {
+pub fn decode_ttl_key(
+    key: &[u8],
+) -> Result<(u8, i64, &str, &str, &[u8]), StorageError> {
     if key.len() < 1 + 8 + 1 + 1 {
         return Err(StorageError::Internal("malformed TTL key".into()));
     }

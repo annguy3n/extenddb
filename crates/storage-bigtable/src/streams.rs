@@ -86,7 +86,7 @@ pub fn build_record(
     if !spec.stream_enabled {
         return None;
     }
-    let view = spec.stream_view_type.clone()?;
+    let view = spec.stream_view_type?;
     let event_name = match (old, new) {
         (None, Some(_)) => StreamEventName::Insert,
         (Some(_), Some(_)) => StreamEventName::Modify,
@@ -95,12 +95,12 @@ pub fn build_record(
     };
     let representative = new.or(old)?;
     let keys = extract_keys(representative, key_schema);
-    let new_image = if view_includes_new(view.clone()) {
+    let new_image = if view_includes_new(view) {
         new.map(|n| n.clone().into_iter().collect())
     } else {
         None
     };
-    let old_image = if view_includes_old(view.clone()) {
+    let old_image = if view_includes_old(view) {
         old.map(|o| o.clone().into_iter().collect())
     } else {
         None

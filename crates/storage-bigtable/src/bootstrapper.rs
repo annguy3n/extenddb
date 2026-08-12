@@ -133,7 +133,7 @@ impl Bootstrapper for BigtableBootstrapper {
         }
         let mut key = [0u8; 32];
         OsRng.try_fill_bytes(&mut key).map_err(|e| OpError::Internal(format!("rng: {e}")))?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&key);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key);
         cat.put(
             keys::KEY_MATERIAL_ENC,
             &json!({
