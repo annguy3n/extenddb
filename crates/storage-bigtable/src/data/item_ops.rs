@@ -17,6 +17,9 @@ use crate::data::encoding::{cell, row_key};
 /// Family for DDB attribute cells.
 pub const FAMILY_DATA: &str = "d";
 
+/// Family for transaction intent locks and metadata.
+pub const FAMILY_METADATA: &str = "m";
+
 /// Holds the table-specific context for a sequence of data operations.
 pub struct ItemOps<'a> {
     client: &'a BigtableClient,
@@ -137,6 +140,82 @@ impl<'a> ItemOps<'a> {
         }
 
         Ok(out)
+    }
+
+    /// Read multiple rows into Item maps while checking for active 2PC intent locks in column family `m`.
+    /// Returns (items, has_active_lock).
+    /// If has_active_lock is true, at least one of the requested rows currently has an active intent lock.
+    pub async fn batch_get_with_intent_check(
+        &self,
+        key_info: &TableKeyInfo,
+        keys: &[Item],
+    ) -> Result<(Vec<Option<Item>>, bool), StorageError> {
+        if keys.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let mut row_keys = Vec::with_capacity(keys.len());
+        for k in keys {
+            row_keys.push(row_key::encode_key(k, &key_info.key_schema)?);
+        }
+        let mut data = self.client.data();
+        let req = ReadRowsRequest {
+            table_name: self.full_table_name.clone(),
+            rows_limit: keys.len() as i64,
+            rows: Some(RowSet {
+                row_keys,
+                row_ranges: vec![],
+            }),
+            filter: Some(RowFilter {
+                filter: Some(Filter::CellsPerColumnLimitFilter(1)),
+            }),
+            ..ReadRowsRequest::default()
+        };
+        let resp = data
+            .read_rows(req)
+            .await
+            .map_err(|e| StorageError::Internal(format!("ReadRows batch_get_with_intent_check: {e}")))?;
+
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or(0);
+        let cutoff_micros = now_micros - (self.intent_timeout_secs as i64 * 1_000_000);
+
+        let mut row_map = BTreeMap::new();
+        let mut has_active_lock = false;
+
+        for (rkey, cells) in resp {
+            let mut item: Item = BTreeMap::new();
+            for c in cells {
+                if c.family_name == FAMILY_DATA {
+                    let attr_name = String::from_utf8(c.qualifier).map_err(|e| {
+                        StorageError::Internal(format!("decode qualifier: {e}"))
+                    })?;
+                    let value = cell::decode(&c.value)?;
+                    item.insert(attr_name, value);
+                } else if c.family_name == FAMILY_METADATA
+                    && c.qualifier.starts_with(b"intent:")
+                    && c.timestamp_micros >= cutoff_micros
+                {
+                    has_active_lock = true;
+                }
+            }
+            if !item.is_empty() {
+                row_map.insert(rkey, item);
+            }
+        }
+
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            let rkey = row_key::encode_key(k, &key_info.key_schema)?;
+            if let Some(item) = row_map.get(&rkey) {
+                out.push(Some(item.clone()));
+            } else {
+                out.push(None);
+            }
+        }
+
+        Ok((out, has_active_lock))
     }
 
     /// Read multiple rows into Item maps using pre-encoded raw row keys.

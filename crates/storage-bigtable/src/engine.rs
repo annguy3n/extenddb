@@ -1231,11 +1231,14 @@ impl DataEngine for BigtableEngine {
             .collect();
         Box::pin(async move {
             let total_ops = owned.len();
-            let mut out: Vec<Option<Item>> = vec![None; total_ops];
-            
+            if total_ops == 0 {
+                return Ok(Vec::new());
+            }
+
             // Group by data_table to batch with concurrent metadata resolution.
             let resolve_futures = owned
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(idx, (key_info, key))| async move {
                     let data_table = self.data_table_for(&key_info).await?;
@@ -1249,31 +1252,54 @@ impl DataEngine for BigtableEngine {
                 grouped.entry(data_table).or_default().push((idx, key_info, key));
             }
 
-            let mut futures = Vec::new();
-            for (data_table, group_ops) in grouped {
-                let client = self.client.clone();
-                let intent_timeout_secs = self.intent_timeout_secs;
-                futures.push(async move {
-                    let ops_helper = ItemOps::new(&client, &data_table, intent_timeout_secs);
-                    if let Some((_, key_info, _)) = group_ops.first() {
-                        let keys: Vec<Item> = group_ops.iter().map(|(_, _, k)| k.clone()).collect();
-                        let results = ops_helper.batch_get(key_info, &keys).await?;
-                        Ok::<_, StorageError>((group_ops, results))
-                    } else {
-                        Ok::<_, StorageError>((Vec::new(), Vec::new()))
-                    }
-                });
-            }
+            let start_time = std::time::Instant::now();
+            let max_duration = std::time::Duration::from_secs(self.intent_timeout_secs.max(1));
+            let mut backoff = std::time::Duration::from_millis(25);
 
-            let group_results = futures::future::join_all(futures).await;
-            for res in group_results {
-                let (group_ops, results) = res?;
-                for ((idx, _, _), item) in group_ops.into_iter().zip(results) {
-                    out[idx] = item;
+            loop {
+                let mut futures = Vec::new();
+                for (data_table, group_ops) in &grouped {
+                    let client = self.client.clone();
+                    let intent_timeout_secs = self.intent_timeout_secs;
+                    let group_ops = group_ops.clone();
+                    futures.push(async move {
+                        let ops_helper = ItemOps::new(&client, data_table, intent_timeout_secs);
+                        if let Some((_, key_info, _)) = group_ops.first() {
+                            let keys: Vec<Item> = group_ops.iter().map(|(_, _, k)| k.clone()).collect();
+                            let (results, has_lock) = ops_helper.batch_get_with_intent_check(key_info, &keys).await?;
+                            Ok::<_, StorageError>((group_ops, results, has_lock))
+                        } else {
+                            Ok::<_, StorageError>((Vec::new(), Vec::new(), false))
+                        }
+                    });
                 }
-            }
 
-            Ok(out)
+                let group_results = futures::future::try_join_all(futures).await?;
+                let mut conflict = false;
+                let mut out: Vec<Option<Item>> = vec![None; total_ops];
+
+                for (group_ops, results, has_lock) in group_results {
+                    if has_lock {
+                        conflict = true;
+                    }
+                    for ((idx, _, _), item) in group_ops.into_iter().zip(results) {
+                        out[idx] = item;
+                    }
+                }
+
+                if !conflict {
+                    return Ok(out);
+                }
+
+                if start_time.elapsed() >= max_duration {
+                    return Err(StorageError::TransactionConflict(
+                        "TransactGetItems timed out waiting for active intent locks to clear".to_string(),
+                    ));
+                }
+
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(500));
+            }
         })
     }
 
