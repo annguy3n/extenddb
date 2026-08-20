@@ -20,6 +20,9 @@ const TAG_S: u8 = 0x53;
 const TAG_N: u8 = 0x4E;
 const TAG_B: u8 = 0x42;
 
+/// Maximum allowed row key size in Cloud Bigtable (4KB = 4096 bytes).
+pub const MAX_ROW_KEY_SIZE: usize = 4096;
+
 /// One past the largest possible SK encoding byte. Used to construct exclusive
 /// upper bounds for partition-scan ranges; 16 copies make for-all-practical-
 /// purposes "unreachable".
@@ -88,6 +91,13 @@ pub fn encode_key(
         out.push(sk_tag);
         out.extend_from_slice(&sk_bytes);
     }
+    if out.len() > MAX_ROW_KEY_SIZE {
+        return Err(StorageError::Validation(format!(
+            "encoded row key size ({} bytes) exceeds Bigtable maximum limit of {} bytes",
+            out.len(),
+            MAX_ROW_KEY_SIZE
+        )));
+    }
     Ok(out)
 }
 
@@ -135,7 +145,7 @@ pub fn decode_key(
     }
 
     let mut idx = 0;
-    
+
     // Decode PK
     let pk_tag = key[idx];
     idx += 1;
@@ -143,20 +153,24 @@ pub fn decode_key(
         return Err(StorageError::Internal("malformed row key (PK len)".into()));
     }
     let pk_len = u32::from_be_bytes(
-        key[idx..idx+4]
+        key[idx..idx + 4]
             .try_into()
-            .map_err(|_| StorageError::Internal("failed to convert slice to array".into()))?
+            .map_err(|_| StorageError::Internal("failed to convert slice to array".into()))?,
     ) as usize;
     idx += 4;
     if key.len() < idx + pk_len {
-        return Err(StorageError::Internal("malformed row key (PK bytes)".into()));
+        return Err(StorageError::Internal(
+            "malformed row key (PK bytes)".into(),
+        ));
     }
-    let pk_bytes = &key[idx..idx+pk_len];
+    let pk_bytes = &key[idx..idx + pk_len];
     idx += pk_len;
-    
+
     let pk_val = match pk_tag {
-        TAG_S => AttributeValue::S(String::from_utf8(pk_bytes.to_vec())
-            .map_err(|e| StorageError::Internal(format!("decode PK S: {e}")))?),
+        TAG_S => AttributeValue::S(
+            String::from_utf8(pk_bytes.to_vec())
+                .map_err(|e| StorageError::Internal(format!("decode PK S: {e}")))?,
+        ),
         TAG_B => AttributeValue::B(pk_bytes.to_vec()),
         TAG_N => AttributeValue::N(number::decode(pk_bytes)?),
         _ => return Err(StorageError::Internal(format!("unknown PK tag: {pk_tag}"))),
@@ -173,10 +187,12 @@ pub fn decode_key(
         let sk_tag = key[idx];
         idx += 1;
         let sk_bytes = &key[idx..];
-        
+
         let sk_val = match sk_tag {
-            TAG_S => AttributeValue::S(String::from_utf8(sk_bytes.to_vec())
-                .map_err(|e| StorageError::Internal(format!("decode SK S: {e}")))?),
+            TAG_S => AttributeValue::S(
+                String::from_utf8(sk_bytes.to_vec())
+                    .map_err(|e| StorageError::Internal(format!("decode SK S: {e}")))?,
+            ),
             TAG_B => AttributeValue::B(sk_bytes.to_vec()),
             TAG_N => AttributeValue::N(number::decode(sk_bytes)?),
             _ => return Err(StorageError::Internal(format!("unknown SK tag: {sk_tag}"))),
@@ -254,10 +270,10 @@ mod tests {
         let mut item = std::collections::BTreeMap::new();
         item.insert("pk".to_string(), AttributeValue::S("partition".into()));
         item.insert("sk".to_string(), AttributeValue::N("123.45".into()));
-        
+
         let key = encode_key(&item, &schema).unwrap();
         let decoded = decode_key(&key, &schema).unwrap();
-        
+
         assert_eq!(item.get("pk"), decoded.get("pk"));
         let enc_orig = encode_key(&item, &schema).unwrap();
         let enc_dec = encode_key(&decoded, &schema).unwrap();
@@ -270,14 +286,30 @@ mod tests {
         let mut item = std::collections::BTreeMap::new();
         item.insert("pk".to_string(), AttributeValue::B(vec![1, 2, 3, 4]));
         item.insert("sk".to_string(), AttributeValue::N("-99.99".into()));
-        
+
         let key = encode_key(&item, &schema).unwrap();
         let decoded = decode_key(&key, &schema).unwrap();
-        
+
         assert_eq!(item.get("pk"), decoded.get("pk"));
-        
+
         let enc_orig = encode_key(&item, &schema).unwrap();
         let enc_dec = encode_key(&decoded, &schema).unwrap();
         assert_eq!(enc_orig, enc_dec);
+    }
+
+    #[test]
+    fn rejects_key_exceeding_4kb_limit() {
+        let schema = vec![ks("pk", KeyType::Hash)];
+        let mut item = std::collections::BTreeMap::new();
+        let big_str = "a".repeat(4096);
+        item.insert("pk".to_string(), AttributeValue::S(big_str));
+        let res = encode_key(&item, &schema);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            StorageError::Validation(msg) => {
+                assert!(msg.contains("exceeds Bigtable maximum limit of 4096 bytes"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
     }
 }

@@ -8,20 +8,19 @@ use std::time::Duration;
 
 use extenddb_storage::{DataEngine, TableEngine};
 use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{
-    MutateRowRequest, Mutation, ReadRowsRequest, RowFilter, RowRange, RowSet,
-    mutation,
+    MutateRowRequest, Mutation, ReadRowsRequest, RowFilter, RowRange, RowSet, mutation,
     mutation::DeleteFromRow,
     row_filter::Filter,
     row_range::{EndKey, StartKey},
 };
 
 use crate::BigtableEngine;
-use crate::data::client::BigtableClient;
 use crate::catalog::Catalog;
+use crate::data::client::BigtableClient;
 
 pub async fn run(engine: Arc<BigtableEngine>, cadence: Duration) {
     tracing::info!("bigtable TTL worker started; cadence={:?}", cadence);
-    
+
     if let Err(e) = ensure_ttl_index_table(engine.client_ref()).await {
         tracing::warn!("could not ensure TTL index table: {e}");
     }
@@ -69,7 +68,7 @@ pub async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn sweep_shard(
+async fn sweep_shard(
     engine: &BigtableEngine,
     shard_id: u8,
     now_epoch_s: i64,
@@ -106,6 +105,7 @@ pub async fn sweep_shard(
 
         let req = ReadRowsRequest {
             table_name: full_index_table.clone(),
+            app_profile_id: client.app_profile_id.clone().unwrap_or_default(),
             rows_limit: limit,
             rows: Some(RowSet {
                 row_keys: vec![],
@@ -117,7 +117,8 @@ pub async fn sweep_shard(
             ..ReadRowsRequest::default()
         };
 
-        let resp = data.read_rows(req)
+        let resp = data
+            .read_rows(req)
             .await
             .map_err(|e| format!("ReadRows from TTL index: {e}"))?;
 
@@ -129,7 +130,7 @@ pub async fn sweep_shard(
 
         for (raw_key, _) in resp {
             last_key = Some(raw_key.clone());
-            let (_, expiry, account_id, table_name, base_row_key) = 
+            let (_, expiry, account_id, table_name, base_row_key) =
                 match crate::data::encoding::ttl_key::decode_ttl_key(&raw_key) {
                     Ok(decoded) => decoded,
                     Err(e) => {
@@ -137,7 +138,7 @@ pub async fn sweep_shard(
                         continue;
                     }
                 };
-            
+
             if expiry > now_epoch_s {
                 continue;
             }
@@ -145,55 +146,31 @@ pub async fn sweep_shard(
             let key_info = match TableEngine::table_key_info(engine, account_id, table_name).await {
                 Ok(ki) => ki,
                 Err(e) => {
-                    tracing::warn!("could not fetch key info for table {account_id}/{table_name}: {e}");
+                    tracing::warn!(
+                        "could not fetch key info for table {account_id}/{table_name}: {e}"
+                    );
                     let _ = delete_ttl_index_entry_raw(engine, &raw_key).await;
                     continue;
                 }
             };
 
-            let base_key = match crate::data::encoding::row_key::decode_key(base_row_key, &key_info.key_schema) {
+            let base_key = match crate::data::encoding::row_key::decode_key(
+                base_row_key,
+                &key_info.key_schema,
+            ) {
                 Ok(k) => k,
                 Err(e) => {
-                    tracing::warn!("failed to decode base row key for table {account_id}/{table_name}: {e}");
+                    tracing::warn!(
+                        "failed to decode base row key for table {account_id}/{table_name}: {e}"
+                    );
                     let _ = delete_ttl_index_entry_raw(engine, &raw_key).await;
                     continue;
                 }
             };
-
-            // Fetch live base item to verify TTL has not been extended to the future.
-            let live_item = match DataEngine::get_item(engine, &key_info, &base_key).await {
-                Ok(Some(item)) => item,
-                Ok(None) => {
-                    // Base item already deleted. Clean up stale TTL index entry.
-                    let _ = delete_ttl_index_entry_raw(engine, &raw_key).await;
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!("failed to get live base item for TTL check: {e}");
-                    continue;
-                }
-            };
-
-            // If table has TTL configured and live TTL is greater than current time, skip deleting base item.
-            if let Ok((_, _, Some(attr_name))) = engine.table_full_meta_for(&key_info).await
-                && let Some(live_expiry) = crate::engine::get_ttl_expiry(&live_item, &attr_name)
-                && live_expiry > now_epoch_s {
-                    // TTL extended in base row; delete only this stale index entry.
-                    let _ = delete_ttl_index_entry_raw(engine, &raw_key).await;
-                    continue;
-            }
 
             let maps = extenddb_core::expression::ExpressionMaps::default();
-            match DataEngine::delete_item(
-                engine,
-                &key_info,
-                &base_key,
-                false,
-                None,
-                &maps,
-                None,
-            )
-            .await
+            match DataEngine::delete_item(engine, &key_info, &base_key, false, None, &maps, None)
+                .await
             {
                 Ok(_) => {
                     let _ = delete_ttl_index_entry_raw(engine, &raw_key).await;
@@ -216,16 +193,14 @@ pub async fn sweep_shard(
     Ok(())
 }
 
-async fn delete_ttl_index_entry_raw(
-    engine: &BigtableEngine,
-    raw_key: &[u8],
-) -> Result<(), String> {
+async fn delete_ttl_index_entry_raw(engine: &BigtableEngine, raw_key: &[u8]) -> Result<(), String> {
     let client = engine.client_ref();
     let mut data = client.data();
     let full_index_table = client.full_table_name(crate::data::encoding::ttl_key::TTL_INDEX_TABLE);
-    
+
     let req = MutateRowRequest {
         table_name: full_index_table,
+        app_profile_id: client.app_profile_id.clone().unwrap_or_default(),
         row_key: raw_key.to_vec(),
         mutations: vec![Mutation {
             mutation: Some(mutation::Mutation::DeleteFromRow(DeleteFromRow {})),
@@ -240,7 +215,11 @@ async fn delete_ttl_index_entry_raw(
 
 pub async fn ensure_ttl_index_table(client: &BigtableClient) -> Result<(), String> {
     let mut admin = crate::data::admin::AdminClient::connect(client).await?;
-    admin.create_table(crate::data::encoding::ttl_key::TTL_INDEX_TABLE, &[("d", None)])
+    admin
+        .create_table(
+            crate::data::encoding::ttl_key::TTL_INDEX_TABLE,
+            &[("d", Some(crate::data::admin::gc_max_versions(1)))],
+        )
         .await
         .map_err(|e| format!("create TTL index table: {e}"))?;
     Ok(())

@@ -39,9 +39,9 @@ impl<'a> QueryScan<'a> {
         maps: &'b ExpressionMaps,
     ) -> Result<&'b AttributeValue, StorageError> {
         match expr {
-            Expr::Placeholder(name) => maps.resolve_value(name).map_err(|e| {
-                StorageError::Validation(format!("placeholder resolve: {e}"))
-            }),
+            Expr::Placeholder(name) => maps
+                .resolve_value(name)
+                .map_err(|e| StorageError::Validation(format!("placeholder resolve: {e}"))),
             _ => Err(StorageError::Validation(
                 "key condition values must be placeholders".into(),
             )),
@@ -190,12 +190,8 @@ impl<'a> QueryScan<'a> {
         let _ = pk_name; // pk_name validation is enough; we use pk_value directly
         let pk_value = self.resolve_expr_value(&kc.pk_value, maps)?.clone();
 
-        let (mut start, mut end, mut end_open) = self.build_range_for_query(
-            key_info,
-            pk_value.clone(),
-            kc.sk_condition.as_ref(),
-            maps,
-        )?;
+        let (mut start, mut end, mut end_open) =
+            self.build_range_for_query(key_info, pk_value.clone(), kc.sk_condition.as_ref(), maps)?;
 
         // ExclusiveStartKey narrows the range to skip past the row the caller
         // last returned. For forward, this means start = resume + 0x00 (smallest
@@ -228,6 +224,7 @@ impl<'a> QueryScan<'a> {
         // and we can optimize it later if we want.
         let req = ReadRowsRequest {
             table_name: self.full_table_name.clone(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             rows: Some(RowSet {
                 row_keys: vec![],
                 row_ranges: vec![RowRange {
@@ -243,7 +240,7 @@ impl<'a> QueryScan<'a> {
             filter: Some(RowFilter {
                 filter: Some(Filter::CellsPerColumnLimitFilter(1)),
             }),
-            reversed: false,
+            reversed: !forward,
             ..ReadRowsRequest::default()
         };
         let resp = data
@@ -255,13 +252,6 @@ impl<'a> QueryScan<'a> {
         for (_key, cells) in resp {
             if let Some(item) = Self::cells_to_item(cells)? {
                 items.push(item);
-            }
-        }
-
-        if !forward {
-            items.reverse();
-            if let Some(l) = limit {
-                items.truncate(l as usize);
             }
         }
 
@@ -297,7 +287,9 @@ impl<'a> QueryScan<'a> {
         let pk_start = row_key::pk_range_start(&pk_value)?;
         let pk_end = row_key::pk_range_end_inclusive(&pk_value)?;
 
-        use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::{Chain, Condition};
+        use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::{
+            Chain, Condition,
+        };
 
         let predicate = RowFilter {
             filter: Some(Filter::ColumnQualifierRegexFilter(
@@ -328,6 +320,7 @@ impl<'a> QueryScan<'a> {
 
         let req = ReadRowsRequest {
             table_name: self.full_table_name.clone(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             rows: Some(RowSet {
                 row_keys: vec![],
                 row_ranges: vec![RowRange {
@@ -349,9 +342,10 @@ impl<'a> QueryScan<'a> {
         let mut items: Vec<Item> = Vec::with_capacity(resp.len());
         for (_raw_key, cells) in resp {
             if let Some(item) = Self::cells_to_item(cells)?
-                && item.contains_key(&lsi_sk_name) {
-                    items.push(item);
-                }
+                && item.contains_key(&lsi_sk_name)
+            {
+                items.push(item);
+            }
         }
 
         // Sort by LSI sort key.
@@ -448,13 +442,10 @@ impl<'a> QueryScan<'a> {
             None => Vec::new(),
         };
 
-        let total = total_segments.unwrap_or(1).max(1) as u64;
-        let seg = segment.unwrap_or(0).max(0) as u64 % total;
-        let is_parallel = total > 1;
-
         let mut data = self.client.data();
         let req = ReadRowsRequest {
             table_name: self.full_table_name.clone(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             rows: Some(RowSet {
                 row_keys: vec![],
                 row_ranges: vec![RowRange {
@@ -462,7 +453,7 @@ impl<'a> QueryScan<'a> {
                     end_key: None,
                 }],
             }),
-            rows_limit: if is_parallel { 0 } else { limit.unwrap_or(0) },
+            rows_limit: limit.unwrap_or(0),
             filter: Some(RowFilter {
                 filter: Some(Filter::CellsPerColumnLimitFilter(1)),
             }),
@@ -473,20 +464,18 @@ impl<'a> QueryScan<'a> {
             .await
             .map_err(|e| StorageError::Internal(format!("Scan ReadRows: {e}")))?;
 
+        let total = total_segments.unwrap_or(1).max(1) as u64;
+        let seg = segment.unwrap_or(0).max(0) as u64 % total;
+
         let mut items: Vec<Item> = Vec::with_capacity(resp.len());
         let mut last_key: Option<Vec<u8>> = None;
-        let limit_val = limit.map(|l| l as usize);
         for (raw_key, cells) in resp {
-            if is_parallel && hash_segment(&raw_key, total) != seg {
+            if total > 1 && hash_segment(&raw_key, total) != seg {
                 continue;
             }
             if let Some(item) = Self::cells_to_item(cells)? {
                 items.push(item);
                 last_key = Some(raw_key);
-                if let Some(l) = limit_val
-                    && items.len() == l {
-                        break;
-                    }
             }
         }
 
@@ -519,7 +508,6 @@ fn hash_segment(key: &[u8], total: u64) -> u64 {
 }
 
 /// Filter items by a KeyCondition's sort-key clause.
-#[allow(clippy::type_complexity)]
 fn filter_items_by_sk_condition(
     items: Vec<Item>,
     sk_name: &str,
@@ -535,7 +523,8 @@ fn filter_items_by_sk_condition(
             let target = qs.resolve_expr_value(value, maps)?.clone();
             let target_enc = encode(&target)?;
             use extenddb_core::expression::CompareOp;
-            let keep: Box<dyn Fn(&[u8]) -> bool> = match op {
+            type KeepPredicate = Box<dyn Fn(&[u8]) -> bool>;
+            let keep: KeepPredicate = match op {
                 CompareOp::Eq => Box::new(move |enc: &[u8]| enc == target_enc.as_slice()),
                 CompareOp::Lt => Box::new(move |enc: &[u8]| enc < target_enc.as_slice()),
                 CompareOp::Le => Box::new(move |enc: &[u8]| enc <= target_enc.as_slice()),

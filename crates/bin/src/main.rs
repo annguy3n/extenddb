@@ -30,7 +30,12 @@ compile_error!(
      thin bin installs exactly one backend (e.g. build the Bigtable binary with \
      `--no-default-features --features bigtable`)"
 );
-#[cfg(not(any(feature = "postgres", feature = "mongodb", feature = "sqlite", feature = "bigtable")))]
+#[cfg(not(any(
+    feature = "postgres",
+    feature = "mongodb",
+    feature = "sqlite",
+    feature = "bigtable"
+)))]
 compile_error!(
     "no backend selected: enable the `postgres` (default), `mongodb`, `sqlite`, or `bigtable` feature"
 );

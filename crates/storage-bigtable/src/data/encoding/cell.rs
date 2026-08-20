@@ -59,18 +59,16 @@ pub fn encode(av: &AttributeValue) -> Result<Vec<u8>, StorageError> {
         AttributeValue::Bool(b) => vec![TAG_BOOL, if *b { 1 } else { 0 }],
         AttributeValue::Null => vec![TAG_NULL],
         AttributeValue::SS(set) => {
-            let body = serde_json::to_vec(set).map_err(|e| {
-                StorageError::Internal(format!("encode SS: {e}"))
-            })?;
+            let body = serde_json::to_vec(set)
+                .map_err(|e| StorageError::Internal(format!("encode SS: {e}")))?;
             let mut out = Vec::with_capacity(1 + body.len());
             out.push(TAG_SS);
             out.extend_from_slice(&body);
             out
         }
         AttributeValue::NS(set) => {
-            let body = serde_json::to_vec(set).map_err(|e| {
-                StorageError::Internal(format!("encode NS: {e}"))
-            })?;
+            let body = serde_json::to_vec(set)
+                .map_err(|e| StorageError::Internal(format!("encode NS: {e}")))?;
             let mut out = Vec::with_capacity(1 + body.len());
             out.push(TAG_NS);
             out.extend_from_slice(&body);
@@ -84,9 +82,8 @@ pub fn encode(av: &AttributeValue) -> Result<Vec<u8>, StorageError> {
                 .iter()
                 .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
                 .collect();
-            let body = serde_json::to_vec(&encoded).map_err(|e| {
-                StorageError::Internal(format!("encode BS: {e}"))
-            })?;
+            let body = serde_json::to_vec(&encoded)
+                .map_err(|e| StorageError::Internal(format!("encode BS: {e}")))?;
             let mut out = Vec::with_capacity(1 + body.len());
             out.push(TAG_BS);
             out.extend_from_slice(&body);
@@ -95,18 +92,16 @@ pub fn encode(av: &AttributeValue) -> Result<Vec<u8>, StorageError> {
         AttributeValue::L(list) => {
             // AttributeValue's serde Serialize emits {"S": "..."} etc. — the
             // DDB-spec wire form — which the Deserialize impl reverses.
-            let body = serde_json::to_vec(list).map_err(|e| {
-                StorageError::Internal(format!("encode L: {e}"))
-            })?;
+            let body = serde_json::to_vec(list)
+                .map_err(|e| StorageError::Internal(format!("encode L: {e}")))?;
             let mut out = Vec::with_capacity(1 + body.len());
             out.push(TAG_L);
             out.extend_from_slice(&body);
             out
         }
         AttributeValue::M(map) => {
-            let body = serde_json::to_vec(map).map_err(|e| {
-                StorageError::Internal(format!("encode M: {e}"))
-            })?;
+            let body = serde_json::to_vec(map)
+                .map_err(|e| StorageError::Internal(format!("encode M: {e}")))?;
             let mut out = Vec::with_capacity(1 + body.len());
             out.push(TAG_M);
             out.extend_from_slice(&body);
@@ -116,9 +111,9 @@ pub fn encode(av: &AttributeValue) -> Result<Vec<u8>, StorageError> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<AttributeValue, StorageError> {
-    let tag = *bytes.first().ok_or_else(|| {
-        StorageError::Internal("cell payload empty (no type tag)".into())
-    })?;
+    let tag = *bytes
+        .first()
+        .ok_or_else(|| StorageError::Internal("cell payload empty (no type tag)".into()))?;
     let payload = &bytes[1..];
     Ok(match tag {
         TAG_S => AttributeValue::S(
@@ -228,7 +223,10 @@ mod tests {
             AttributeValue::S("x".into()),
             AttributeValue::N("42".into()),
             AttributeValue::Bool(true),
-            AttributeValue::L(vec![AttributeValue::Null, AttributeValue::S("nested".into())]),
+            AttributeValue::L(vec![
+                AttributeValue::Null,
+                AttributeValue::S("nested".into()),
+            ]),
         ]);
         rt(l);
     }

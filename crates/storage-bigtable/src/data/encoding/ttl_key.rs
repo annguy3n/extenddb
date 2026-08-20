@@ -19,7 +19,9 @@ pub fn encode_ttl_key(
     }
     let shard_id = (h % NUM_SHARDS as u64) as u8;
 
-    let mut out = Vec::with_capacity(1 + 8 + 1 + account_id.len() + 1 + table_name.len() + base_row_key.len());
+    let mut out = Vec::with_capacity(
+        1 + 8 + 1 + account_id.len() + 1 + table_name.len() + base_row_key.len(),
+    );
     out.push(shard_id);
     out.extend_from_slice(&expiry.to_be_bytes());
     out.push(account_id.len() as u8);
@@ -32,31 +34,31 @@ pub fn encode_ttl_key(
 
 /// Decode a TTL index row key back into its components.
 /// Returns (shard_id, expiry, account_id, table_name, base_row_key)
-pub fn decode_ttl_key(
-    key: &[u8],
-) -> Result<(u8, i64, &str, &str, &[u8]), StorageError> {
+pub fn decode_ttl_key(key: &[u8]) -> Result<(u8, i64, &str, &str, &[u8]), StorageError> {
     if key.len() < 1 + 8 + 1 + 1 {
         return Err(StorageError::Internal("malformed TTL key".into()));
     }
     let shard_id = key[0];
-    let expiry_bytes: [u8; 8] = key[1..9].try_into().map_err(|_| StorageError::Internal("malformed TTL key (expiry)".into()))?;
+    let expiry_bytes: [u8; 8] = key[1..9]
+        .try_into()
+        .map_err(|_| StorageError::Internal("malformed TTL key (expiry)".into()))?;
     let expiry = i64::from_be_bytes(expiry_bytes);
-    
+
     let acct_len = key[9] as usize;
     if key.len() < 9 + 1 + acct_len + 1 {
         return Err(StorageError::Internal("malformed TTL key (account)".into()));
     }
-    let account_id = std::str::from_utf8(&key[10..10+acct_len])
+    let account_id = std::str::from_utf8(&key[10..10 + acct_len])
         .map_err(|e| StorageError::Internal(format!("decode account: {e}")))?;
-    
+
     let table_len_idx = 10 + acct_len;
     let table_len = key[table_len_idx] as usize;
     if key.len() < table_len_idx + 1 + table_len {
         return Err(StorageError::Internal("malformed TTL key (table)".into()));
     }
-    let table_name = std::str::from_utf8(&key[table_len_idx+1..table_len_idx+1+table_len])
+    let table_name = std::str::from_utf8(&key[table_len_idx + 1..table_len_idx + 1 + table_len])
         .map_err(|e| StorageError::Internal(format!("decode table: {e}")))?;
-    
+
     let base_key_idx = table_len_idx + 1 + table_len;
     let base_row_key = &key[base_key_idx..];
 

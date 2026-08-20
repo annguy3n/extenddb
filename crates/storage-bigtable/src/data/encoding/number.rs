@@ -126,10 +126,13 @@ pub fn decode(bytes: &[u8]) -> Result<String, StorageError> {
         return Ok("0".to_string());
     }
     if bytes.len() != 2 + MANTISSA_DIGITS {
-        return Err(StorageError::Internal(format!("invalid encoded number length: {}", bytes.len())));
+        return Err(StorageError::Internal(format!(
+            "invalid encoded number length: {}",
+            bytes.len()
+        )));
     }
     let biased_exp = bytes[1];
-    
+
     let (is_pos, exp, raw_digits) = if sign == SIGN_POS {
         let exp = (biased_exp as i32) - EXP_BIAS;
         let mut digs = Vec::with_capacity(MANTISSA_DIGITS);
@@ -213,27 +216,30 @@ mod tests {
         for w in values.windows(2) {
             let a = enc(w[0]);
             let b = enc(w[1]);
-            assert!(a < b, "expected {} < {} (encoded {:?} < {:?})", w[0], w[1], a, b);
+            assert!(
+                a < b,
+                "expected {} < {} (encoded {:?} < {:?})",
+                w[0],
+                w[1],
+                a,
+                b
+            );
         }
     }
 
     #[test]
     fn lex_matches_numeric_full_spectrum() {
         check_order(&[
-            "-1e125", "-1e10", "-100", "-99.99", "-10", "-1.51", "-1.5", "-1.05",
-            "-1", "-0.5", "-0.1", "-1e-10", "-1e-130",
-            "0",
-            "1e-130", "1e-10", "0.1", "0.5", "1", "1.05", "1.5", "1.51", "10",
-            "99.99", "100", "1e10", "1e125",
+            "-1e125", "-1e10", "-100", "-99.99", "-10", "-1.51", "-1.5", "-1.05", "-1", "-0.5",
+            "-0.1", "-1e-10", "-1e-130", "0", "1e-130", "1e-10", "0.1", "0.5", "1", "1.05", "1.5",
+            "1.51", "10", "99.99", "100", "1e10", "1e125",
         ]);
     }
 
     #[test]
     fn lex_matches_numeric_near_zero_dense() {
         check_order(&[
-            "-0.0011", "-0.001", "-0.0009", "-0.0001",
-            "0",
-            "0.0001", "0.0009", "0.001", "0.0011",
+            "-0.0011", "-0.001", "-0.0009", "-0.0001", "0", "0.0001", "0.0009", "0.001", "0.0011",
         ]);
     }
 
@@ -278,15 +284,29 @@ mod tests {
     #[test]
     fn round_trip_decode() {
         let cases = [
-            "0", "1", "-1", "10", "100", "0.5", "-0.5", "3.14", "-0.045",
-            "1.23e5", "1.23e-5", "-1.23e5", "-1.23e-5",
+            "0",
+            "1",
+            "-1",
+            "10",
+            "100",
+            "0.5",
+            "-0.5",
+            "3.14",
+            "-0.045",
+            "1.23e5",
+            "1.23e-5",
+            "-1.23e5",
+            "-1.23e-5",
             "12345678901234567890123456789012345678",
         ];
         for c in cases {
             let encoded = encode(c).unwrap();
             let decoded = decode(&encoded).unwrap();
             let re_encoded = encode(&decoded).unwrap();
-            assert_eq!(encoded, re_encoded, "roundtrip fail for {c} -> decoded {decoded}");
+            assert_eq!(
+                encoded, re_encoded,
+                "roundtrip fail for {c} -> decoded {decoded}"
+            );
         }
     }
 }

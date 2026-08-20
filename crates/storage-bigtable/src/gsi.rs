@@ -86,13 +86,24 @@ pub fn shadow_row_key_for_item(
     out.extend_from_slice(&bytes);
 
     // Base sort key (optional)
-    if let Some(base_sk) = base_key_schema.iter().find(|k| k.key_type == KeyType::Range) {
+    if let Some(base_sk) = base_key_schema
+        .iter()
+        .find(|k| k.key_type == KeyType::Range)
+    {
         let sk_val = item.get(&base_sk.attribute_name).ok_or_else(|| {
             StorageError::Validation(format!("item missing key attr {}", base_sk.attribute_name))
         })?;
         let (tag, bytes) = tag_bytes_for(sk_val)?;
         out.push(tag);
         out.extend_from_slice(&bytes);
+    }
+
+    if out.len() > row_key::MAX_ROW_KEY_SIZE {
+        return Err(StorageError::Validation(format!(
+            "encoded GSI shadow row key size ({} bytes) exceeds Bigtable maximum limit of {} bytes",
+            out.len(),
+            row_key::MAX_ROW_KEY_SIZE
+        )));
     }
 
     Ok(Some(out))
@@ -136,11 +147,12 @@ pub fn project_for_shadow(
         copy_named(&ks.attribute_name);
     }
     if matches!(projection.projection_type, ProjectionType::Include)
-        && let Some(extras) = &projection.non_key_attributes {
-            for name in extras {
-                copy_named(name);
-            }
+        && let Some(extras) = &projection.non_key_attributes
+    {
+        for name in extras {
+            copy_named(name);
         }
+    }
     out
 }
 
@@ -162,5 +174,37 @@ pub fn decode_shadow_cells(
         Ok(None)
     } else {
         Ok(Some(item))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use extenddb_core::types::KeyType;
+
+    #[test]
+    fn test_shadow_row_key_4kb_limit() {
+        let base_ks = vec![KeySchemaElement {
+            attribute_name: "pk".to_string(),
+            key_type: KeyType::Hash,
+        }];
+        let gsi_ks = vec![KeySchemaElement {
+            attribute_name: "gsi_pk".to_string(),
+            key_type: KeyType::Hash,
+        }];
+
+        let mut item = BTreeMap::new();
+        item.insert("pk".to_string(), AttributeValue::S("pk_val".to_string()));
+        item.insert("gsi_pk".to_string(), AttributeValue::S("x".repeat(5000)));
+
+        let res = shadow_row_key_for_item(&item, &gsi_ks, &base_ks);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        match err {
+            StorageError::Validation(msg) => {
+                assert!(msg.contains("exceeds Bigtable maximum limit of 4096 bytes"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
     }
 }

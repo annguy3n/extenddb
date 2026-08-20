@@ -51,13 +51,19 @@ impl OperationsEngine for BigtableOperationsEngine {
                 name.len()
             )));
         }
-        let first = name.chars().next().ok_or_else(|| StorageError::Internal(format!("{label} must not be empty")))?;
+        let first = name
+            .chars()
+            .next()
+            .ok_or_else(|| StorageError::Internal(format!("{label} must not be empty")))?;
         if !first.is_ascii_alphanumeric() && first != '_' {
             return Err(StorageError::Internal(format!(
                 "{label} must start with alphanumeric or underscore"
             )));
         }
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
             return Err(StorageError::Internal(format!(
                 "{label} contains invalid characters (only alphanumeric, _, -, . allowed)"
             )));

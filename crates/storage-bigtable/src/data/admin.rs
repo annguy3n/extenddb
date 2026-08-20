@@ -10,10 +10,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use gcp_auth::TokenProvider;
 use googleapis_tonic_google_bigtable_admin_v2::google::bigtable::admin::v2::{
     ColumnFamily, CreateTableRequest, DeleteTableRequest, GcRule, ListTablesRequest,
     ModifyColumnFamiliesRequest, Table,
     bigtable_table_admin_client::BigtableTableAdminClient,
+    gc_rule,
     modify_column_families_request::{Modification, modification::Mod},
 };
 use tonic::Status;
@@ -21,13 +23,19 @@ use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
-use gcp_auth::TokenProvider;
 
 use crate::data::client::BigtableClient;
 
 const BIGTABLE_ADMIN_ENDPOINT: &str = "https://bigtableadmin.googleapis.com:443";
 const BIGTABLE_ADMIN_HOST: &str = "bigtableadmin.googleapis.com";
 const BIGTABLE_ADMIN_SCOPE: &str = "https://www.googleapis.com/auth/bigtable.admin";
+
+/// Convenience helper to build a GC rule that keeps at most `n` cell versions.
+pub fn gc_max_versions(n: i32) -> GcRule {
+    GcRule {
+        rule: Some(gc_rule::Rule::MaxNumVersions(n)),
+    }
+}
 
 /// Interceptor that adds an `Authorization: Bearer ...` header to every
 /// outgoing request when a token is present (set for real GCP, absent for
@@ -198,8 +206,8 @@ impl AdminClient {
     pub async fn list_tables(&mut self) -> Result<Vec<String>, String> {
         let req = ListTablesRequest {
             parent: self.instance_name.clone(),
-            view: 0,        // NAME_ONLY
-            page_size: 0,   // server default
+            view: 0,      // NAME_ONLY
+            page_size: 0, // server default
             page_token: String::new(),
         };
         let resp = self

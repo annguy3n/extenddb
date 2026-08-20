@@ -17,15 +17,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use extenddb_core::expression::{
-    Expr, ExpressionMaps, KeyCondition, UpdateAction,
-    parse_condition, parse_key_condition, parse_update, tokenize,
+    Expr, ExpressionMaps, KeyCondition, UpdateAction, parse_condition, parse_key_condition,
+    parse_update, tokenize,
 };
 use extenddb_core::types::{
-    AttributeDefinition, AttributeValue, BillingMode, CreateTableInput,
-    DescribeTableInput, GsiInput, Item, KeySchemaElement, KeyType,
-    ListTablesInput, Projection, ProjectionType,
-    ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
-    TableStatus, TimeToLiveStatus,
+    AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DescribeTableInput,
+    GsiInput, Item, KeySchemaElement, KeyType, ListTablesInput, Projection, ProjectionType,
+    ReturnValuesOnConditionCheckFailure, ScalarAttributeType, TableStatus, TimeToLiveStatus,
 };
 use extenddb_storage::bootstrapper::Bootstrapper;
 use extenddb_storage::error::StorageError;
@@ -48,7 +46,11 @@ struct TestContext {
 }
 
 fn unique_name(prefix: &str) -> String {
-    format!("{}_{}", prefix, &Uuid::new_v4().to_string().replace('-', "")[..12])
+    format!(
+        "{}_{}",
+        prefix,
+        &Uuid::new_v4().to_string().replace('-', "")[..12]
+    )
 }
 
 fn parse_cond(expr_str: &str) -> Expr {
@@ -73,10 +75,10 @@ async fn setup_emulator_context() -> Option<TestContext> {
     };
 
     let suffix = &Uuid::new_v4().to_string().replace('-', "")[..8];
-    let project_id = std::env::var("BIGTABLE_PROJECT_ID")
-        .unwrap_or_else(|_| format!("test-proj-{suffix}"));
-    let instance_id = std::env::var("BIGTABLE_INSTANCE_ID")
-        .unwrap_or_else(|_| format!("test-inst-{suffix}"));
+    let project_id =
+        std::env::var("BIGTABLE_PROJECT_ID").unwrap_or_else(|_| format!("test-proj-{suffix}"));
+    let instance_id =
+        std::env::var("BIGTABLE_INSTANCE_ID").unwrap_or_else(|_| format!("test-inst-{suffix}"));
 
     let config = BigtableStorageConfig {
         project_id,
@@ -146,11 +148,19 @@ async fn test_bootstrapping_and_table_lifecycle() {
 
     let bootstrapper = BigtableBootstrapper::new(ctx.config.clone());
     let init_res = bootstrapper.is_catalog_initialized().await;
-    assert!(init_res.is_ok(), "is_catalog_initialized failed: {:?}", init_res.err());
+    assert!(
+        init_res.is_ok(),
+        "is_catalog_initialized failed: {:?}",
+        init_res.err()
+    );
     assert!(init_res.unwrap(), "catalog should be initialized");
 
     let version = bootstrapper.read_catalog_version().await;
-    assert!(version.is_ok(), "read_catalog_version failed: {:?}", version.err());
+    assert!(
+        version.is_ok(),
+        "read_catalog_version failed: {:?}",
+        version.err()
+    );
     assert_eq!(version.unwrap(), Some("0.1.0".to_string()));
 
     let table_name = unique_name("tbl_lifecycle");
@@ -200,7 +210,12 @@ async fn test_bootstrapping_and_table_lifecycle() {
     // Describe table
     let described = ctx
         .engine
-        .describe_table(&ctx.account_id, DescribeTableInput { table_name: table_name.clone() })
+        .describe_table(
+            &ctx.account_id,
+            DescribeTableInput {
+                table_name: table_name.clone(),
+            },
+        )
         .await
         .expect("describe_table failed");
     assert_eq!(described.table_name, table_name);
@@ -209,7 +224,13 @@ async fn test_bootstrapping_and_table_lifecycle() {
     // List tables
     let list = ctx
         .engine
-        .list_tables(&ctx.account_id, ListTablesInput { limit: None, exclusive_start_table_name: None })
+        .list_tables(
+            &ctx.account_id,
+            ListTablesInput {
+                limit: None,
+                exclusive_start_table_name: None,
+            },
+        )
         .await
         .expect("list_tables failed");
     assert!(
@@ -317,16 +338,32 @@ async fn test_guarded_single_row_crud() {
         .expect("get_item failed")
         .expect("item not found");
 
-    assert_eq!(fetched.get("name"), Some(&AttributeValue::S("Alice".to_string())));
-    assert_eq!(fetched.get("age"), Some(&AttributeValue::N("30".to_string())));
-    assert_eq!(fetched.get("counter"), Some(&AttributeValue::N("100".to_string())));
+    assert_eq!(
+        fetched.get("name"),
+        Some(&AttributeValue::S("Alice".to_string()))
+    );
+    assert_eq!(
+        fetched.get("age"),
+        Some(&AttributeValue::N("30".to_string()))
+    );
+    assert_eq!(
+        fetched.get("counter"),
+        Some(&AttributeValue::N("100".to_string()))
+    );
     assert_eq!(fetched.get("active"), Some(&AttributeValue::Bool(true)));
 
     // 3. PutItem (guarded with failing condition)
     let cond = parse_cond("attribute_not_exists(pk)");
     let ccf_result = ctx
         .engine
-        .put_item(&key_info, item.clone(), false, Some(&cond), &empty_maps, None)
+        .put_item(
+            &key_info,
+            item.clone(),
+            false,
+            Some(&cond),
+            &empty_maps,
+            None,
+        )
         .await;
     assert!(
         matches!(ccf_result, Err(StorageError::ConditionFailed(_))),
@@ -339,17 +376,20 @@ async fn test_guarded_single_row_crud() {
     update_maps
         .values
         .insert("new_age".to_string(), AttributeValue::N("31".to_string()));
-    update_maps
-        .values
-        .insert("email".to_string(), AttributeValue::S("alice@example.com".to_string()));
+    update_maps.values.insert(
+        "email".to_string(),
+        AttributeValue::S("alice@example.com".to_string()),
+    );
     update_maps
         .values
         .insert("inc".to_string(), AttributeValue::N("25".to_string()));
-    update_maps
-        .values
-        .insert("expected_age".to_string(), AttributeValue::N("30".to_string()));
+    update_maps.values.insert(
+        "expected_age".to_string(),
+        AttributeValue::N("30".to_string()),
+    );
 
-    let update_actions = parse_upd("SET age = :new_age, email = :email, counter = counter + :inc REMOVE active");
+    let update_actions =
+        parse_upd("SET age = :new_age, email = :email, counter = counter + :inc REMOVE active");
     let update_cond = parse_cond("age = :expected_age");
 
     let (old_upd, new_upd) = ctx
@@ -368,11 +408,20 @@ async fn test_guarded_single_row_crud() {
         .expect("guarded update_item failed");
 
     let old_upd = old_upd.expect("expected old item");
-    assert_eq!(old_upd.get("age"), Some(&AttributeValue::N("30".to_string())));
+    assert_eq!(
+        old_upd.get("age"),
+        Some(&AttributeValue::N("30".to_string()))
+    );
 
     let new_upd = new_upd.expect("expected new item");
-    assert_eq!(new_upd.get("age"), Some(&AttributeValue::N("31".to_string())));
-    assert_eq!(new_upd.get("counter"), Some(&AttributeValue::N("125".to_string())));
+    assert_eq!(
+        new_upd.get("age"),
+        Some(&AttributeValue::N("31".to_string()))
+    );
+    assert_eq!(
+        new_upd.get("counter"),
+        Some(&AttributeValue::N("125".to_string()))
+    );
     assert_eq!(
         new_upd.get("email"),
         Some(&AttributeValue::S("alice@example.com".to_string()))
@@ -468,8 +517,16 @@ async fn test_transact_write_items_and_rollback() {
         table_class: None,
         on_demand_throughput: None,
     };
-    let _ = ctx.engine.create_table(&ctx.account_id, input1).await.unwrap();
-    let key_info1 = ctx.engine.table_key_info(&ctx.account_id, &tbl1_name).await.unwrap();
+    let _ = ctx
+        .engine
+        .create_table(&ctx.account_id, input1)
+        .await
+        .unwrap();
+    let key_info1 = ctx
+        .engine
+        .table_key_info(&ctx.account_id, &tbl1_name)
+        .await
+        .unwrap();
 
     // Table 2 (Inventory)
     let input2 = CreateTableInput {
@@ -493,18 +550,32 @@ async fn test_transact_write_items_and_rollback() {
         table_class: None,
         on_demand_throughput: None,
     };
-    let _ = ctx.engine.create_table(&ctx.account_id, input2).await.unwrap();
-    let key_info2 = ctx.engine.table_key_info(&ctx.account_id, &tbl2_name).await.unwrap();
+    let _ = ctx
+        .engine
+        .create_table(&ctx.account_id, input2)
+        .await
+        .unwrap();
+    let key_info2 = ctx
+        .engine
+        .table_key_info(&ctx.account_id, &tbl2_name)
+        .await
+        .unwrap();
 
     let empty_maps = ExpressionMaps::default();
 
     // 1. Successful 2PC transaction across distinct tables with idempotency token
     let mut order_item: Item = BTreeMap::new();
-    order_item.insert("order_id".to_string(), AttributeValue::S("ord#1001".to_string()));
+    order_item.insert(
+        "order_id".to_string(),
+        AttributeValue::S("ord#1001".to_string()),
+    );
     order_item.insert("total".to_string(), AttributeValue::N("250".to_string()));
 
     let mut inv_item: Item = BTreeMap::new();
-    inv_item.insert("item_id".to_string(), AttributeValue::S("prod#50".to_string()));
+    inv_item.insert(
+        "item_id".to_string(),
+        AttributeValue::S("prod#50".to_string()),
+    );
     inv_item.insert("stock".to_string(), AttributeValue::N("99".to_string()));
 
     let ops = vec![
@@ -540,12 +611,18 @@ async fn test_transact_write_items_and_rollback() {
 
     // Verify both writes landed
     let mut ord_key: Item = BTreeMap::new();
-    ord_key.insert("order_id".to_string(), AttributeValue::S("ord#1001".to_string()));
+    ord_key.insert(
+        "order_id".to_string(),
+        AttributeValue::S("ord#1001".to_string()),
+    );
     let ord_get = ctx.engine.get_item(&key_info1, &ord_key).await.unwrap();
     assert!(ord_get.is_some());
 
     let mut inv_key: Item = BTreeMap::new();
-    inv_key.insert("item_id".to_string(), AttributeValue::S("prod#50".to_string()));
+    inv_key.insert(
+        "item_id".to_string(),
+        AttributeValue::S("prod#50".to_string()),
+    );
     let inv_get = ctx.engine.get_item(&key_info2, &inv_key).await.unwrap();
     assert!(inv_get.is_some());
 
@@ -555,7 +632,10 @@ async fn test_transact_write_items_and_rollback() {
         token: &token_str,
         fingerprint: "fp-ord1001",
     };
-    let replay_res = ctx.engine.transact_write_items(&[], Some(replay_token)).await;
+    let replay_res = ctx
+        .engine
+        .transact_write_items(&[], Some(replay_token))
+        .await;
     assert!(matches!(replay_res, Err(StorageError::IdempotentReplay)));
 
     let mismatch_token = IdempotencyKey {
@@ -563,8 +643,14 @@ async fn test_transact_write_items_and_rollback() {
         token: &token_str,
         fingerprint: "fp-mismatch",
     };
-    let mismatch_res = ctx.engine.transact_write_items(&[], Some(mismatch_token)).await;
-    assert!(matches!(mismatch_res, Err(StorageError::IdempotentMismatch)));
+    let mismatch_res = ctx
+        .engine
+        .transact_write_items(&[], Some(mismatch_token))
+        .await;
+    assert!(matches!(
+        mismatch_res,
+        Err(StorageError::IdempotentMismatch)
+    ));
 
     // 3. Concurrent TransactGetItems across both tables
     let get_op1 = TransactGetOp {
@@ -584,11 +670,17 @@ async fn test_transact_write_items_and_rollback() {
 
     // 4. Transaction Rollback on Condition Check Failure
     let mut order_item2: Item = BTreeMap::new();
-    order_item2.insert("order_id".to_string(), AttributeValue::S("ord#1002".to_string()));
+    order_item2.insert(
+        "order_id".to_string(),
+        AttributeValue::S("ord#1002".to_string()),
+    );
     order_item2.insert("total".to_string(), AttributeValue::N("500".to_string()));
 
     let mut missing_inv_key: Item = BTreeMap::new();
-    missing_inv_key.insert("item_id".to_string(), AttributeValue::S("prod#9999".to_string()));
+    missing_inv_key.insert(
+        "item_id".to_string(),
+        AttributeValue::S("prod#9999".to_string()),
+    );
 
     let fail_cond = parse_cond("attribute_exists(item_id)");
 
@@ -618,7 +710,10 @@ async fn test_transact_write_items_and_rollback() {
 
     // Verify order_item2 was NOT written (atomicity rollback verified!)
     let mut ord2_key: Item = BTreeMap::new();
-    ord2_key.insert("order_id".to_string(), AttributeValue::S("ord#1002".to_string()));
+    ord2_key.insert(
+        "order_id".to_string(),
+        AttributeValue::S("ord#1002".to_string()),
+    );
     let ord2_get = ctx.engine.get_item(&key_info1, &ord2_key).await.unwrap();
     assert!(
         ord2_get.is_none(),
@@ -672,17 +767,29 @@ async fn test_decimal_number_keys_and_range_scan() {
         on_demand_throughput: None,
     };
 
-    let _ = ctx.engine.create_table(&ctx.account_id, input).await.unwrap();
-    let key_info = ctx.engine.table_key_info(&ctx.account_id, &table_name).await.unwrap();
+    let _ = ctx
+        .engine
+        .create_table(&ctx.account_id, input)
+        .await
+        .unwrap();
+    let key_info = ctx
+        .engine
+        .table_key_info(&ctx.account_id, &table_name)
+        .await
+        .unwrap();
 
     let readings = vec![
-        "-1000.5", "-100.5", "-50.25", "-1.0", "0", "0.005", "0.5", "1.0", "10.5", "100.0", "999.99", "1000.5",
+        "-1000.5", "-100.5", "-50.25", "-1.0", "0", "0.005", "0.5", "1.0", "10.5", "100.0",
+        "999.99", "1000.5",
     ];
 
     let empty_maps = ExpressionMaps::default();
     for r in &readings {
         let mut item: Item = BTreeMap::new();
-        item.insert("sensor_id".to_string(), AttributeValue::S("sensor#1".to_string()));
+        item.insert(
+            "sensor_id".to_string(),
+            AttributeValue::S("sensor#1".to_string()),
+        );
         item.insert("reading".to_string(), AttributeValue::N((*r).to_string()));
         item.insert("status".to_string(), AttributeValue::S("OK".to_string()));
         ctx.engine
@@ -755,7 +862,10 @@ async fn test_decimal_number_keys_and_range_scan() {
         })
         .collect();
 
-    assert_eq!(rev_actual, rev_expected, "reverse scan must match reversed numerical order");
+    assert_eq!(
+        rev_actual, rev_expected,
+        "reverse scan must match reversed numerical order"
+    );
 
     // Scan table with limit pagination
     let (scanned_first, last_key) = ctx
@@ -838,38 +948,71 @@ async fn test_gsi_shadow_table_operations_and_query() {
         on_demand_throughput: None,
     };
 
-    let _ = ctx.engine.create_table(&ctx.account_id, input).await.unwrap();
-    let key_info = ctx.engine.table_key_info(&ctx.account_id, &table_name).await.unwrap();
+    let _ = ctx
+        .engine
+        .create_table(&ctx.account_id, input)
+        .await
+        .unwrap();
+    let key_info = ctx
+        .engine
+        .table_key_info(&ctx.account_id, &table_name)
+        .await
+        .unwrap();
 
     let empty_maps = ExpressionMaps::default();
 
     // Put employees
     let mut emp1: Item = BTreeMap::new();
     emp1.insert("emp_id".to_string(), AttributeValue::S("emp#1".to_string()));
-    emp1.insert("department".to_string(), AttributeValue::S("Engineering".to_string()));
-    emp1.insert("salary".to_string(), AttributeValue::N("120000".to_string()));
+    emp1.insert(
+        "department".to_string(),
+        AttributeValue::S("Engineering".to_string()),
+    );
+    emp1.insert(
+        "salary".to_string(),
+        AttributeValue::N("120000".to_string()),
+    );
     emp1.insert("name".to_string(), AttributeValue::S("Alice".to_string()));
-    ctx.engine.put_item(&key_info, emp1, false, None, &empty_maps, None).await.unwrap();
+    ctx.engine
+        .put_item(&key_info, emp1, false, None, &empty_maps, None)
+        .await
+        .unwrap();
 
     let mut emp2: Item = BTreeMap::new();
     emp2.insert("emp_id".to_string(), AttributeValue::S("emp#2".to_string()));
-    emp2.insert("department".to_string(), AttributeValue::S("Engineering".to_string()));
-    emp2.insert("salary".to_string(), AttributeValue::N("150000".to_string()));
+    emp2.insert(
+        "department".to_string(),
+        AttributeValue::S("Engineering".to_string()),
+    );
+    emp2.insert(
+        "salary".to_string(),
+        AttributeValue::N("150000".to_string()),
+    );
     emp2.insert("name".to_string(), AttributeValue::S("Bob".to_string()));
-    ctx.engine.put_item(&key_info, emp2, false, None, &empty_maps, None).await.unwrap();
+    ctx.engine
+        .put_item(&key_info, emp2, false, None, &empty_maps, None)
+        .await
+        .unwrap();
 
     let mut emp3: Item = BTreeMap::new();
     emp3.insert("emp_id".to_string(), AttributeValue::S("emp#3".to_string()));
-    emp3.insert("department".to_string(), AttributeValue::S("Sales".to_string()));
+    emp3.insert(
+        "department".to_string(),
+        AttributeValue::S("Sales".to_string()),
+    );
     emp3.insert("salary".to_string(), AttributeValue::N("90000".to_string()));
     emp3.insert("name".to_string(), AttributeValue::S("Carol".to_string()));
-    ctx.engine.put_item(&key_info, emp3, false, None, &empty_maps, None).await.unwrap();
+    ctx.engine
+        .put_item(&key_info, emp3, false, None, &empty_maps, None)
+        .await
+        .unwrap();
 
     // Query GSI on department = "Engineering"
     let mut gsi_maps = ExpressionMaps::default();
-    gsi_maps
-        .values
-        .insert("dept".to_string(), AttributeValue::S("Engineering".to_string()));
+    gsi_maps.values.insert(
+        "dept".to_string(),
+        AttributeValue::S("Engineering".to_string()),
+    );
 
     let gsi_kc = parse_kc("department = :dept");
 
@@ -948,9 +1091,10 @@ async fn test_gsi_shadow_table_operations_and_query() {
 
     // Query GSI for department = "Management" -> emp1
     let mut mgmt_maps = ExpressionMaps::default();
-    mgmt_maps
-        .values
-        .insert("dept".to_string(), AttributeValue::S("Management".to_string()));
+    mgmt_maps.values.insert(
+        "dept".to_string(),
+        AttributeValue::S("Management".to_string()),
+    );
     let (mgmt_items, _) = ctx
         .engine
         .query(
@@ -1029,7 +1173,11 @@ async fn test_ttl_index_operations() {
         on_demand_throughput: None,
     };
 
-    let _ = ctx.engine.create_table(&ctx.account_id, input).await.unwrap();
+    let _ = ctx
+        .engine
+        .create_table(&ctx.account_id, input)
+        .await
+        .unwrap();
 
     // Enable TTL
     ctx.engine
@@ -1046,17 +1194,32 @@ async fn test_ttl_index_operations() {
     assert_eq!(ttl_desc.time_to_live_status, TimeToLiveStatus::Enabled);
     assert_eq!(ttl_desc.attribute_name, Some("expires_at".to_string()));
 
-    let key_info = ctx.engine.table_key_info(&ctx.account_id, &table_name).await.unwrap();
+    let key_info = ctx
+        .engine
+        .table_key_info(&ctx.account_id, &table_name)
+        .await
+        .unwrap();
     let empty_maps = ExpressionMaps::default();
 
     // Ensure TTL index table before putting TTL items
-    ensure_ttl_index_table(&ctx.client).await.expect("ensure TTL table");
+    ensure_ttl_index_table(&ctx.client)
+        .await
+        .expect("ensure TTL table");
 
     // Put expired item (past timestamp)
     let mut expired_item: Item = BTreeMap::new();
-    expired_item.insert("session_id".to_string(), AttributeValue::S("sess#expired".to_string()));
-    expired_item.insert("expires_at".to_string(), AttributeValue::N("1000".to_string()));
-    expired_item.insert("data".to_string(), AttributeValue::S("temp_token".to_string()));
+    expired_item.insert(
+        "session_id".to_string(),
+        AttributeValue::S("sess#expired".to_string()),
+    );
+    expired_item.insert(
+        "expires_at".to_string(),
+        AttributeValue::N("1000".to_string()),
+    );
+    expired_item.insert(
+        "data".to_string(),
+        AttributeValue::S("temp_token".to_string()),
+    );
     ctx.engine
         .put_item(&key_info, expired_item, false, None, &empty_maps, None)
         .await
@@ -1064,9 +1227,18 @@ async fn test_ttl_index_operations() {
 
     // Put valid item (far future timestamp)
     let mut valid_item: Item = BTreeMap::new();
-    valid_item.insert("session_id".to_string(), AttributeValue::S("sess#active".to_string()));
-    valid_item.insert("expires_at".to_string(), AttributeValue::N("9999999999".to_string()));
-    valid_item.insert("data".to_string(), AttributeValue::S("permanent_token".to_string()));
+    valid_item.insert(
+        "session_id".to_string(),
+        AttributeValue::S("sess#active".to_string()),
+    );
+    valid_item.insert(
+        "expires_at".to_string(),
+        AttributeValue::N("9999999999".to_string()),
+    );
+    valid_item.insert(
+        "data".to_string(),
+        AttributeValue::S("permanent_token".to_string()),
+    );
     ctx.engine
         .put_item(&key_info, valid_item, false, None, &empty_maps, None)
         .await
@@ -1074,8 +1246,14 @@ async fn test_ttl_index_operations() {
 
     // Put permanent item without TTL
     let mut perm_item: Item = BTreeMap::new();
-    perm_item.insert("session_id".to_string(), AttributeValue::S("sess#permanent".to_string()));
-    perm_item.insert("data".to_string(), AttributeValue::S("no_ttl_token".to_string()));
+    perm_item.insert(
+        "session_id".to_string(),
+        AttributeValue::S("sess#permanent".to_string()),
+    );
+    perm_item.insert(
+        "data".to_string(),
+        AttributeValue::S("no_ttl_token".to_string()),
+    );
     ctx.engine
         .put_item(&key_info, perm_item, false, None, &empty_maps, None)
         .await
@@ -1083,11 +1261,18 @@ async fn test_ttl_index_operations() {
 
     // Execute sweep_once pass
     let sweep_res = sweep_once(&ctx.engine).await;
-    assert!(sweep_res.is_ok(), "sweep_once failed: {:?}", sweep_res.err());
+    assert!(
+        sweep_res.is_ok(),
+        "sweep_once failed: {:?}",
+        sweep_res.err()
+    );
 
     // Verify expired item was removed by sweep
     let mut exp_key: Item = BTreeMap::new();
-    exp_key.insert("session_id".to_string(), AttributeValue::S("sess#expired".to_string()));
+    exp_key.insert(
+        "session_id".to_string(),
+        AttributeValue::S("sess#expired".to_string()),
+    );
     let exp_check = ctx.engine.get_item(&key_info, &exp_key).await.unwrap();
     assert!(
         exp_check.is_none(),
@@ -1096,13 +1281,22 @@ async fn test_ttl_index_operations() {
 
     // Verify valid item remains
     let mut act_key: Item = BTreeMap::new();
-    act_key.insert("session_id".to_string(), AttributeValue::S("sess#active".to_string()));
+    act_key.insert(
+        "session_id".to_string(),
+        AttributeValue::S("sess#active".to_string()),
+    );
     let act_check = ctx.engine.get_item(&key_info, &act_key).await.unwrap();
     assert!(act_check.is_some(), "active session must not be deleted");
 
     // Verify permanent item without TTL remains
     let mut perm_key: Item = BTreeMap::new();
-    perm_key.insert("session_id".to_string(), AttributeValue::S("sess#permanent".to_string()));
+    perm_key.insert(
+        "session_id".to_string(),
+        AttributeValue::S("sess#permanent".to_string()),
+    );
     let perm_check = ctx.engine.get_item(&key_info, &perm_key).await.unwrap();
-    assert!(perm_check.is_some(), "permanent session must not be deleted");
+    assert!(
+        perm_check.is_some(),
+        "permanent session must not be deleted"
+    );
 }

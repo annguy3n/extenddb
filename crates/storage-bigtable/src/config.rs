@@ -22,6 +22,16 @@ pub struct BigtableStorageConfig {
     #[serde(default)]
     pub data_instance_id: Option<String>,
 
+    /// Optional BigTable application profile ID.
+    ///
+    /// # Routing Requirements
+    /// Cloud Bigtable requires single-cluster routing (or multi-cluster routing
+    /// with single-row transactions enabled) for conditional mutations
+    /// (`CheckAndMutateRow`). Multi-cluster routing with eventual consistency
+    /// does not support `CheckAndMutateRow` operations.
+    #[serde(default)]
+    pub app_profile_id: Option<String>,
+
     /// Path to a GCP service account JSON key file.
     #[serde(default)]
     pub credentials_path: Option<String>,
@@ -71,6 +81,7 @@ impl Default for BigtableStorageConfig {
             project_id: "extenddb-dev".to_string(),
             instance_id: "extenddb-dev".to_string(),
             data_instance_id: None,
+            app_profile_id: None,
             credentials_path: None,
             emulator_host: Some("localhost:8086".to_string()),
             pool_size: default_pool_size(),
@@ -119,6 +130,9 @@ impl BigtableStorageConfig {
         if let Some(data_inst) = &self.data_instance_id {
             params.push(format!("data_instance_id={data_inst}"));
         }
+        if let Some(app_profile) = &self.app_profile_id {
+            params.push(format!("app_profile_id={app_profile}"));
+        }
         if let Some(cred_path) = &self.credentials_path {
             params.push(format!("credentials_path={cred_path}"));
         }
@@ -158,6 +172,7 @@ impl BigtableStorageConfig {
         let mut emulator_host = None;
         let mut dev_mode = false;
         let mut data_instance_id = None;
+        let mut app_profile_id = None;
         let mut credentials_path = None;
         let mut ttl_scan = default_ttl_scan_cadence();
         let mut sweeper = default_sweeper_cadence();
@@ -169,11 +184,16 @@ impl BigtableStorageConfig {
                     Some(("emulator", v)) => emulator_host = Some(v.to_owned()),
                     Some(("dev_mode", v)) => dev_mode = v == "true" || v == "1",
                     Some(("data_instance_id", v)) => data_instance_id = Some(v.to_owned()),
+                    Some(("app_profile_id", v)) => app_profile_id = Some(v.to_owned()),
                     Some(("credentials_path", v)) => credentials_path = Some(v.to_owned()),
                     Some(("ttl_scan", v)) => ttl_scan = v.parse().unwrap_or(ttl_scan),
                     Some(("sweeper", v)) => sweeper = v.parse().unwrap_or(sweeper),
-                    Some(("intent_timeout", v)) => intent_timeout = v.parse().unwrap_or(intent_timeout),
-                    Some(("gsi_reconcile", v)) => gsi_reconcile = v.parse().unwrap_or(gsi_reconcile),
+                    Some(("intent_timeout", v)) => {
+                        intent_timeout = v.parse().unwrap_or(intent_timeout)
+                    }
+                    Some(("gsi_reconcile", v)) => {
+                        gsi_reconcile = v.parse().unwrap_or(gsi_reconcile)
+                    }
                     _ => {}
                 }
             }
@@ -182,6 +202,7 @@ impl BigtableStorageConfig {
             project_id,
             instance_id,
             data_instance_id,
+            app_profile_id,
             credentials_path,
             emulator_host,
             pool_size: default_pool_size(),
@@ -197,7 +218,7 @@ impl BigtableStorageConfig {
 
 impl StorageConfig for BigtableStorageConfig {
     fn connection_config(&self) -> &str {
-        &self.project_id
+        Box::leak(self.connection_string().into_boxed_str())
     }
 
     fn max_connections(&self) -> u32 {
@@ -214,5 +235,38 @@ impl StorageConfig for BigtableStorageConfig {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_url_roundtrip_with_app_profile() {
+        let mut cfg = BigtableStorageConfig::default();
+        cfg.project_id = "my-proj".to_string();
+        cfg.instance_id = "my-inst".to_string();
+        cfg.app_profile_id = Some("single-cluster-profile".to_string());
+        let url = cfg.connection_string();
+        assert!(url.contains("app_profile_id=single-cluster-profile"));
+
+        let parsed = BigtableStorageConfig::from_connection_string(&url).unwrap();
+        assert_eq!(parsed.project_id, "my-proj");
+        assert_eq!(parsed.instance_id, "my-inst");
+        assert_eq!(
+            parsed.app_profile_id.as_deref(),
+            Some("single-cluster-profile")
+        );
+    }
+
+    #[test]
+    fn config_url_without_app_profile() {
+        let cfg = BigtableStorageConfig::default();
+        let url = cfg.connection_string();
+        assert!(!url.contains("app_profile_id="));
+
+        let parsed = BigtableStorageConfig::from_connection_string(&url).unwrap();
+        assert_eq!(parsed.app_profile_id, None);
     }
 }

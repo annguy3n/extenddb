@@ -16,7 +16,10 @@ pub fn encrypt(master_key_b64: &str, plaintext: &[u8]) -> Result<String, String>
         .decode(master_key_b64)
         .map_err(|e| format!("decode master key: {e}"))?;
     if key_bytes.len() != 32 {
-        return Err(format!("master key must be 32 bytes, got {}", key_bytes.len()));
+        return Err(format!(
+            "master key must be 32 bytes, got {}",
+            key_bytes.len()
+        ));
     }
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);
@@ -43,7 +46,10 @@ pub fn decrypt(master_key_b64: &str, sealed_b64: &str) -> Result<Vec<u8>, String
         .decode(master_key_b64)
         .map_err(|e| format!("decode master key: {e}"))?;
     if key_bytes.len() != 32 {
-        return Err(format!("master key must be 32 bytes, got {}", key_bytes.len()));
+        return Err(format!(
+            "master key must be 32 bytes, got {}",
+            key_bytes.len()
+        ));
     }
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);

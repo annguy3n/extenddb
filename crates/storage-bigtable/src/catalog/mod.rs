@@ -12,8 +12,8 @@ use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::mutation::{Delete
 use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::Filter;
 use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_range::{EndKey, StartKey};
 use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{
-    MutateRowRequest, MutateRowsRequest, Mutation, ReadRowsRequest, RowFilter, RowRange, RowSet,
-    CheckAndMutateRowRequest, TimestampRange,
+    CheckAndMutateRowRequest, MutateRowRequest, MutateRowsRequest, Mutation, ReadRowsRequest,
+    RowFilter, RowRange, RowSet, TimestampRange,
 };
 
 use crate::data::client::BigtableClient;
@@ -45,6 +45,7 @@ impl<'c> Catalog<'c> {
         let payload = serde_json::to_vec(value).map_err(|e| format!("catalog put json: {e}"))?;
         let req = MutateRowRequest {
             table_name: self.full_table(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             row_key: row_key.as_bytes().to_vec(),
             mutations: vec![Mutation {
                 mutation: Some(mutation::Mutation::SetCell(SetCell {
@@ -68,6 +69,7 @@ impl<'c> Catalog<'c> {
         let mut data = self.client.data();
         let req = ReadRowsRequest {
             table_name: self.full_table(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             rows_limit: 1,
             rows: Some(RowSet {
                 row_keys: vec![row_key.as_bytes().to_vec()],
@@ -97,6 +99,7 @@ impl<'c> Catalog<'c> {
         let mut data = self.client.data();
         let req = MutateRowRequest {
             table_name: self.full_table(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             row_key: row_key.as_bytes().to_vec(),
             mutations: vec![Mutation {
                 mutation: Some(mutation::Mutation::DeleteFromRow(DeleteFromRow {})),
@@ -121,6 +124,7 @@ impl<'c> Catalog<'c> {
         end_key.push(0xFF);
         let req = ReadRowsRequest {
             table_name: self.full_table(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             rows: Some(RowSet {
                 row_keys: vec![],
                 row_ranges: vec![RowRange {
@@ -173,6 +177,7 @@ impl<'c> Catalog<'c> {
         let count = entries.len() as u64;
         let req = MutateRowsRequest {
             table_name: self.full_table(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             entries,
             ..MutateRowsRequest::default()
         };
@@ -190,12 +195,12 @@ impl<'c> Catalog<'c> {
     ) -> Result<bool, String> {
         let mut data = self.client.data();
         let row_key = format!("lock:{lock_name}");
-        
+
         let now_micros = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0);
-        
+
         let predicate = RowFilter {
             filter: Some(Filter::Chain(
                 googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::Chain {
@@ -209,11 +214,11 @@ impl<'c> Catalog<'c> {
                         RowFilter {
                             filter: Some(Filter::TimestampRangeFilter(TimestampRange {
                                 start_timestamp_micros: now_micros,
-                                end_timestamp_micros: i64::MAX,
+                                end_timestamp_micros: 0,
                             })),
                         },
                     ],
-                }
+                },
             )),
         };
 
@@ -222,19 +227,18 @@ impl<'c> Catalog<'c> {
 
         let req = CheckAndMutateRowRequest {
             table_name: self.full_table(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             row_key: row_key.as_bytes().to_vec(),
             predicate_filter: Some(predicate),
             true_mutations: vec![],
-            false_mutations: vec![
-                Mutation {
-                    mutation: Some(mutation::Mutation::SetCell(SetCell {
-                        family_name: CF.to_owned(),
-                        column_qualifier: QUALIFIER.to_vec(),
-                        timestamp_micros: expires_at_micros,
-                        value: owner.as_bytes().to_vec(),
-                    })),
-                }
-            ],
+            false_mutations: vec![Mutation {
+                mutation: Some(mutation::Mutation::SetCell(SetCell {
+                    family_name: CF.to_owned(),
+                    column_qualifier: QUALIFIER.to_vec(),
+                    timestamp_micros: expires_at_micros,
+                    value: owner.as_bytes().to_vec(),
+                })),
+            }],
             ..Default::default()
         };
 
@@ -249,7 +253,7 @@ impl<'c> Catalog<'c> {
     pub async fn release_lock(&self, lock_name: &str, owner: &str) -> Result<(), String> {
         let mut data = self.client.data();
         let row_key = format!("lock:{lock_name}");
-        
+
         let predicate = RowFilter {
             filter: Some(Filter::Chain(
                 googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::Chain {
@@ -267,19 +271,18 @@ impl<'c> Catalog<'c> {
                             filter: Some(Filter::ValueRegexFilter(owner.as_bytes().to_vec())),
                         },
                     ],
-                }
+                },
             )),
         };
 
         let req = CheckAndMutateRowRequest {
             table_name: self.full_table(),
+            app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
             row_key: row_key.as_bytes().to_vec(),
             predicate_filter: Some(predicate),
-            true_mutations: vec![
-                Mutation {
-                    mutation: Some(mutation::Mutation::DeleteFromRow(DeleteFromRow {})),
-                }
-            ],
+            true_mutations: vec![Mutation {
+                mutation: Some(mutation::Mutation::DeleteFromRow(DeleteFromRow {})),
+            }],
             false_mutations: vec![],
             ..Default::default()
         };

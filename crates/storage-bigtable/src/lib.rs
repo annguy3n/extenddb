@@ -62,8 +62,10 @@ pub fn backend() -> extenddb_storage::Backend {
                             )
                         })?,
                 );
-                Ok(Box::new(BigtableCatalogStore::new(client, None, cfg.dev_mode))
-                    as Box<dyn extenddb_storage::management_store::SettingsStore>)
+                Ok(
+                    Box::new(BigtableCatalogStore::new(client, None, cfg.dev_mode))
+                        as Box<dyn extenddb_storage::management_store::SettingsStore>,
+                )
             })
         },
         diagnostics_store: |connection_string| {
@@ -84,8 +86,10 @@ pub fn backend() -> extenddb_storage::Backend {
                             )
                         })?,
                 );
-                Ok(Box::new(BigtableCatalogStore::new(client, None, cfg.dev_mode))
-                    as Box<dyn extenddb_storage::diagnostics::DiagnosticsStore>)
+                Ok(
+                    Box::new(BigtableCatalogStore::new(client, None, cfg.dev_mode))
+                        as Box<dyn extenddb_storage::diagnostics::DiagnosticsStore>,
+                )
             })
         },
         server_components: server_components_factory,
@@ -99,10 +103,7 @@ fn server_components_factory(
 ) -> std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = Result<
-                    extenddb_storage::ServerComponents,
-                    extenddb_storage::BackendError,
-                >,
+                Output = Result<extenddb_storage::ServerComponents, extenddb_storage::BackendError>,
             > + Send,
     >,
 > {

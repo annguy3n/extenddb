@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::catalog::{Catalog, CATALOG_TABLE, CF, keys};
+use crate::catalog::{CATALOG_TABLE, CF, Catalog, keys};
 use crate::config::BigtableStorageConfig;
 use crate::data::admin::AdminClient;
 use crate::data::client::BigtableClient;
@@ -81,19 +81,21 @@ impl Bootstrapper for BigtableBootstrapper {
 
     async fn create_catalog_db(&self) -> OpResult<()> {
         let client = self.client().await?;
-        let mut admin = AdminClient::connect(client).await.map_err(OpError::Internal)?;
+        let mut admin = AdminClient::connect(client)
+            .await
+            .map_err(OpError::Internal)?;
         admin
-            .create_table(CATALOG_TABLE, &[(CF, None)])
+            .create_table(
+                CATALOG_TABLE,
+                &[(CF, Some(crate::data::admin::gc_max_versions(1)))],
+            )
             .await
             .map_err(OpError::Internal)?;
         Ok(())
     }
 
     async fn create_data_db(&self) -> OpResult<()> {
-        let client = self.client().await?;
-        let mut admin = AdminClient::connect(client).await.map_err(OpError::Internal)?;
-        let _ = admin.create_table(crate::transact::TXN_LOG_TABLE, &[(crate::transact::TXN_FAMILY, None)]).await;
-        let _ = admin.create_table(crate::data::encoding::ttl_key::TTL_INDEX_TABLE, &[("d", None)]).await;
+        // Per-data-table creation happens in CreateTable, not at bootstrap.
         Ok(())
     }
 
@@ -128,11 +130,18 @@ impl Bootstrapper for BigtableBootstrapper {
     async fn bootstrap_encryption_key(&self) -> OpResult<()> {
         let client = self.client().await?;
         let cat = Self::catalog(client);
-        if cat.get(keys::KEY_MATERIAL_ENC).await.map_err(OpError::Internal)?.is_some() {
+        if cat
+            .get(keys::KEY_MATERIAL_ENC)
+            .await
+            .map_err(OpError::Internal)?
+            .is_some()
+        {
             return Ok(());
         }
         let mut key = [0u8; 32];
-        OsRng.try_fill_bytes(&mut key).map_err(|e| OpError::Internal(format!("rng: {e}")))?;
+        OsRng
+            .try_fill_bytes(&mut key)
+            .map_err(|e| OpError::Internal(format!("rng: {e}")))?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(key);
         cat.put(
             keys::KEY_MATERIAL_ENC,
@@ -190,7 +199,10 @@ impl Bootstrapper for BigtableBootstrapper {
                 username,
                 generated_password: None,
                 already_existed: true,
-                from_env: existing.get("from_env").and_then(|v| v.as_bool()).unwrap_or(false),
+                from_env: existing
+                    .get("from_env")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             });
         }
 
@@ -263,7 +275,9 @@ impl Bootstrapper for BigtableBootstrapper {
 
     async fn drop_databases(&self, _data_db: &str) -> OpResult<()> {
         let client = self.client().await?;
-        let mut admin = AdminClient::connect(client).await.map_err(OpError::Internal)?;
+        let mut admin = AdminClient::connect(client)
+            .await
+            .map_err(OpError::Internal)?;
         // Drop every BigTable table we created. Start with the catalog itself.
         let tables = admin.list_tables().await.map_err(OpError::Internal)?;
         for t in tables {
@@ -278,8 +292,11 @@ impl Bootstrapper for BigtableBootstrapper {
         let client = self.client().await?;
         let cat = Self::catalog(client);
         let row = cat.get(keys::VERSION).await.map_err(OpError::Internal)?;
-        Ok(row
-            .and_then(|v| v.get("catalog_version").and_then(|s| s.as_str()).map(str::to_owned)))
+        Ok(row.and_then(|v| {
+            v.get("catalog_version")
+                .and_then(|s| s.as_str())
+                .map(str::to_owned)
+        }))
     }
 
     fn expected_catalog_version(&self) -> String {
@@ -313,13 +330,17 @@ impl Bootstrapper for BigtableBootstrapper {
 project_id = "{}"
 instance_id = "{}"
 # data_instance_id = ""          # Optional instance ID for data tables
+# app_profile_id = ""            # Optional app profile ID (single-cluster routing required)
 # credentials_path = ""          # Optional path to a service account JSON file
 emulator_host = "{}"
 # pool_size = 20                 # Max concurrent connections (default 20)
 # dev_mode = false               # Bypass authentication for local testing (default false)"#,
             self.config.project_id,
             self.config.instance_id,
-            self.config.emulator_host.as_deref().unwrap_or("localhost:8086")
+            self.config
+                .emulator_host
+                .as_deref()
+                .unwrap_or("localhost:8086")
         )
     }
 }

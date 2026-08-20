@@ -83,7 +83,9 @@ impl extenddb_storage::diagnostics::DiagnosticsStore for BigtableCatalogStore {
                 .map_err(extenddb_storage::diagnostics::DiagError::QueryFailed)?;
             let mut count = 0;
             for (_, desc_val) in tables {
-                if let Ok(desc) = serde_json::from_value::<extenddb_core::types::TableDescription>(desc_val) {
+                if let Ok(desc) =
+                    serde_json::from_value::<extenddb_core::types::TableDescription>(desc_val)
+                {
                     count += desc.global_secondary_indexes.map(|g| g.len()).unwrap_or(0);
                     count += desc.local_secondary_indexes.map(|l| l.len()).unwrap_or(0);
                 }
@@ -92,10 +94,10 @@ impl extenddb_storage::diagnostics::DiagnosticsStore for BigtableCatalogStore {
         })
     }
 
-    fn test_data_database_connection(&self) -> BoxFuture<'_, extenddb_storage::diagnostics::DiagResult<String>> {
-        Box::pin(async move {
-            Ok(self.client.instance_id.clone())
-        })
+    fn test_data_database_connection(
+        &self,
+    ) -> BoxFuture<'_, extenddb_storage::diagnostics::DiagResult<String>> {
+        Box::pin(async move { Ok(self.client.instance_id.clone()) })
     }
 }
 
@@ -238,7 +240,13 @@ impl AdminStore for BigtableCatalogStore {
                 let created_at = v
                     .get("created_at")
                     .and_then(|s| s.as_str())
-                    .and_then(|s| time::OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT).ok())
+                    .and_then(|s| {
+                        time::OffsetDateTime::parse(
+                            s,
+                            &time::format_description::well_known::Iso8601::DEFAULT,
+                        )
+                        .ok()
+                    })
                     .unwrap_or_else(time::OffsetDateTime::now_utc);
                 out.push(AdminEntry {
                     admin_name: name,
@@ -498,7 +506,13 @@ impl ManagementStore for BigtableCatalogStore {
                     let created = v
                         .get("created_at")
                         .and_then(|s| s.as_str())
-                        .and_then(|s| time::OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT).ok())
+                        .and_then(|s| {
+                            time::OffsetDateTime::parse(
+                                s,
+                                &time::format_description::well_known::Iso8601::DEFAULT,
+                            )
+                            .ok()
+                        })
                         .unwrap_or_else(time::OffsetDateTime::now_utc);
                     (account_id.clone(), name, arn, has_pw, created)
                 })
@@ -735,11 +749,20 @@ impl ManagementStore for BigtableCatalogStore {
                         .and_then(|s| s.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let doc = v.get("document").cloned().unwrap_or(serde_json::Value::Null);
+                    let doc = v
+                        .get("document")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     let created = v
                         .get("created_at")
                         .and_then(|s| s.as_str())
-                        .and_then(|s| time::OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT).ok())
+                        .and_then(|s| {
+                            time::OffsetDateTime::parse(
+                                s,
+                                &time::format_description::well_known::Iso8601::DEFAULT,
+                            )
+                            .ok()
+                        })
                         .unwrap_or_else(time::OffsetDateTime::now_utc);
                     (name, doc, created)
                 })
@@ -895,11 +918,20 @@ impl ManagementStore for BigtableCatalogStore {
                     .and_then(|s| s.as_str())
                     .unwrap_or("")
                     .to_string();
-                let active = v.get("is_active").and_then(|b| b.as_bool()).unwrap_or(false);
+                let active = v
+                    .get("is_active")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
                 let created = v
                     .get("created_at")
                     .and_then(|s| s.as_str())
-                    .and_then(|s| time::OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT).ok())
+                    .and_then(|s| {
+                        time::OffsetDateTime::parse(
+                            s,
+                            &time::format_description::well_known::Iso8601::DEFAULT,
+                        )
+                        .ok()
+                    })
                     .unwrap_or_else(time::OffsetDateTime::now_utc);
                 out.push((kid, active, created));
             }
@@ -920,8 +952,8 @@ impl ManagementStore for BigtableCatalogStore {
         let secret_access_key = secret_access_key.to_owned();
         Box::pin(async move {
             let enc_key = self.enc_key()?;
-            let sealed =
-                crypto::encrypt(enc_key, secret_access_key.as_bytes()).map_err(OpError::Internal)?;
+            let sealed = crypto::encrypt(enc_key, secret_access_key.as_bytes())
+                .map_err(OpError::Internal)?;
             self.cat()
                 .put(
                     &keys::access_key(&access_key_id),
@@ -1060,10 +1092,7 @@ impl AuthorizationStore for BigtableCatalogStore {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn fetch_resource_tags(
-        &self,
-        _arn: &str,
-    ) -> BoxFuture<'_, OpResult<Vec<(String, String)>>> {
+    fn fetch_resource_tags(&self, _arn: &str) -> BoxFuture<'_, OpResult<Vec<(String, String)>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 }
@@ -1123,15 +1152,19 @@ impl extenddb_auth::CredentialStore for BigtableCredentialStore {
             extenddb_core::error::DynamoDbError::InternalServerError(format!("decrypt: {e}"))
         })?;
         let secret = String::from_utf8(secret_bytes).map_err(|e| {
-            extenddb_core::error::DynamoDbError::InternalServerError(format!(
-                "secret utf8: {e}"
-            ))
+            extenddb_core::error::DynamoDbError::InternalServerError(format!("secret utf8: {e}"))
         })?;
 
         let account_id = row.get("account_id").and_then(|s| s.as_str()).unwrap_or("");
         let user_name = row.get("user_name").and_then(|s| s.as_str()).unwrap_or("");
-        let is_active = row.get("is_active").and_then(|b| b.as_bool()).unwrap_or(true);
-        let is_session = row.get("is_session").and_then(|b| b.as_bool()).unwrap_or(false);
+        let is_active = row
+            .get("is_active")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(true);
+        let is_session = row
+            .get("is_session")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
         let session_token = row
             .get("session_token")
             .and_then(|s| s.as_str())

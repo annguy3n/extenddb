@@ -58,11 +58,17 @@ pub fn next_sequence_number() -> String {
 }
 
 fn view_includes_new(v: StreamViewType) -> bool {
-    matches!(v, StreamViewType::NewImage | StreamViewType::NewAndOldImages)
+    matches!(
+        v,
+        StreamViewType::NewImage | StreamViewType::NewAndOldImages
+    )
 }
 
 fn view_includes_old(v: StreamViewType) -> bool {
-    matches!(v, StreamViewType::OldImage | StreamViewType::NewAndOldImages)
+    matches!(
+        v,
+        StreamViewType::OldImage | StreamViewType::NewAndOldImages
+    )
 }
 
 fn extract_keys(item: &Item, key_schema: &[KeySchemaElement]) -> BTreeMap<String, AttributeValue> {
@@ -132,7 +138,11 @@ pub fn build_record(
 }
 
 /// Persist a stream record into the catalog.
-pub async fn write_record(cat: &Catalog<'_>, arn: &str, record: &StreamRecord) -> Result<(), String> {
+pub async fn write_record(
+    cat: &Catalog<'_>,
+    arn: &str,
+    record: &StreamRecord,
+) -> Result<(), String> {
     let key = keys::stream_record(arn, SINGLE_SHARD_ID, &record.dynamodb.sequence_number);
     let body = serde_json::to_value(record).map_err(|e| format!("encode record: {e}"))?;
     cat.put(&key, &body).await

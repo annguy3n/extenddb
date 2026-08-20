@@ -4,19 +4,20 @@
 //! rolls back aborted transaction intents that exceed `intent_timeout_secs`,
 //! or rolls forward committed ones.
 
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::Filter;
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_range::{EndKey, StartKey};
 use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{
     ReadRowsRequest, RowFilter, RowRange, RowSet,
 };
-use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_filter::Filter;
-use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::row_range::{EndKey, StartKey};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crate::BigtableEngine;
-use crate::transact::{
-    TXN_LOG_TABLE, TXN_FAMILY, TxnCoordinator, ParticipantRow, ParticipantMutation, TxnStreamRecord, TxnState,
-};
 use crate::catalog::Catalog;
+use crate::transact::{
+    ParticipantMutation, ParticipantRow, TXN_FAMILY, TXN_LOG_TABLE, TxnCoordinator, TxnState,
+    TxnStreamRecord,
+};
 
 pub async fn run(engine: Arc<BigtableEngine>, cadence: Duration) {
     tracing::info!("bigtable 2PC sweeper worker started; cadence={:?}", cadence);
@@ -66,7 +67,7 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
         .unwrap_or(0);
-    
+
     let intent_timeout_micros = (engine.intent_timeout_secs() * 1_000_000) as i64;
     let cutoff = now_micros - intent_timeout_micros;
 
@@ -84,6 +85,7 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
 
         let req = ReadRowsRequest {
             table_name: txn_log_table.clone(),
+            app_profile_id: client.app_profile_id.clone().unwrap_or_default(),
             rows_limit: limit,
             rows: Some(RowSet {
                 row_keys: vec![],
@@ -95,7 +97,8 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
             ..ReadRowsRequest::default()
         };
 
-        let resp = data.read_rows(req)
+        let resp = data
+            .read_rows(req)
             .await
             .map_err(|e| format!("ReadRows from TXN log: {e}"))?;
 
@@ -149,8 +152,12 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
                 }
             }
 
-            let Some(st) = state else { continue; };
-            let Some(start) = started_at else { continue; };
+            let Some(st) = state else {
+                continue;
+            };
+            let Some(start) = started_at else {
+                continue;
+            };
 
             if st == "CLEANED" {
                 let _ = coord.drop(&txn_id).await;
@@ -158,9 +165,13 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
             }
 
             if start < cutoff {
-                tracing::info!("2PC Sweeper: found stale transaction {} (state={}, started {}s ago)", 
-                    txn_id, st, (now_micros - start) / 1_000_000);
-                
+                tracing::info!(
+                    "2PC Sweeper: found stale transaction {} (state={}, started {}s ago)",
+                    txn_id,
+                    st,
+                    (now_micros - start) / 1_000_000
+                );
+
                 match st.as_str() {
                     "PENDING" | "ABORTED" => {
                         // Rollback: clear intents on all participants
@@ -168,15 +179,23 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
                         if let Some(parts) = participants {
                             for p in parts {
                                 if let Err(e) = coord.clear_intent(&txn_id, &p).await {
-                                    tracing::warn!("2PC Sweeper: rollback failed to clear intent on {} for txn {}: {}", 
-                                        p.data_table, txn_id, e);
+                                    tracing::warn!(
+                                        "2PC Sweeper: rollback failed to clear intent on {} for txn {}: {}",
+                                        p.data_table,
+                                        txn_id,
+                                        e
+                                    );
                                     success = false;
                                 }
                             }
                         }
                         if success {
                             if let Err(e) = coord.drop(&txn_id).await {
-                                tracing::warn!("2PC Sweeper: failed to drop coordinator row for txn {}: {}", txn_id, e);
+                                tracing::warn!(
+                                    "2PC Sweeper: failed to drop coordinator row for txn {}: {}",
+                                    txn_id,
+                                    e
+                                );
                             } else {
                                 tracing::info!("2PC Sweeper: rolled back stale txn {}", txn_id);
                             }
@@ -195,7 +214,11 @@ async fn sweep_once(engine: &BigtableEngine) -> Result<(), String> {
                             stream_records,
                         };
                         if let Err(e) = engine.roll_forward(&txn_id, &txn_state).await {
-                            tracing::error!("2PC Sweeper: rollforward failed for txn {}: {}", txn_id, e);
+                            tracing::error!(
+                                "2PC Sweeper: rollforward failed for txn {}: {}",
+                                txn_id,
+                                e
+                            );
                         } else {
                             tracing::info!("2PC Sweeper: rolled forward stale txn {}", txn_id);
                         }
