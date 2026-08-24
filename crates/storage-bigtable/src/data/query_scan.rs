@@ -87,11 +87,13 @@ impl<'a> QueryScan<'a> {
     /// where the user explicitly excluded the boundary value.
     fn build_range_for_query(
         &self,
-        _key_info: &TableKeyInfo,
+        key_info: &TableKeyInfo,
         pk_value: AttributeValue,
         sk_condition: Option<&SortKeyCondition>,
         maps: &ExpressionMaps,
     ) -> Result<(Vec<u8>, Vec<u8>, bool), StorageError> {
+        let is_gsi =
+            !key_info.base_key_schema.is_empty() && key_info.base_key_schema != key_info.key_schema;
         let pk_prefix = row_key::pk_range_start(&pk_value)?;
         let pk_upper = row_key::pk_range_end_inclusive(&pk_value)?;
 
@@ -102,7 +104,12 @@ impl<'a> QueryScan<'a> {
                 let (sk_tag, sk_bytes) = row_key::sk_tag_and_bytes(&sk_val)?;
                 let mut exact = pk_prefix.clone();
                 exact.push(sk_tag);
-                exact.extend_from_slice(&sk_bytes);
+                if is_gsi {
+                    let escaped = crate::gsi::escape_bytes_terminated(&sk_bytes);
+                    exact.extend_from_slice(&escaped);
+                } else {
+                    exact.extend_from_slice(&sk_bytes);
+                }
                 let mut exact_plus = exact.clone();
                 row_key::append_sk_upper_trailer(&mut exact_plus);
                 use extenddb_core::expression::CompareOp;
@@ -126,7 +133,12 @@ impl<'a> QueryScan<'a> {
                     let (tag, bytes) = row_key::sk_tag_and_bytes(v)?;
                     let mut out = pk_prefix.clone();
                     out.push(tag);
-                    out.extend_from_slice(&bytes);
+                    if is_gsi {
+                        let escaped = crate::gsi::escape_bytes_terminated(&bytes);
+                        out.extend_from_slice(&escaped);
+                    } else {
+                        out.extend_from_slice(&bytes);
+                    }
                     Ok(out)
                 };
                 let mut hi = make_bound(&high_val)?;
@@ -148,7 +160,12 @@ impl<'a> QueryScan<'a> {
                 };
                 let mut start = pk_prefix.clone();
                 start.push(tag);
-                start.extend_from_slice(&bytes);
+                if is_gsi {
+                    let escaped = crate::gsi::escape_bytes(&bytes);
+                    start.extend_from_slice(&escaped);
+                } else {
+                    start.extend_from_slice(&bytes);
+                }
                 let mut end = start.clone();
                 row_key::append_sk_upper_trailer(&mut end);
                 (start, end, false)
@@ -186,6 +203,8 @@ impl<'a> QueryScan<'a> {
         limit: Option<i64>,
         exclusive_start_key: Option<&Item>,
     ) -> Result<(Vec<Item>, Option<Item>), StorageError> {
+        let is_gsi =
+            !key_info.base_key_schema.is_empty() && key_info.base_key_schema != key_info.key_schema;
         let pk_name = self.path_to_name(&kc.pk_path)?;
         let _ = pk_name; // pk_name validation is enough; we use pk_value directly
         let pk_value = self.resolve_expr_value(&kc.pk_value, maps)?.clone();
@@ -199,7 +218,18 @@ impl<'a> QueryScan<'a> {
         // post-processes a forward scan — so we need to narrow the END of the
         // forward scan to just-below resume, i.e. EndKeyOpen(resume).
         if let Some(esk) = exclusive_start_key {
-            let resume = row_key::encode_key(esk, &key_info.key_schema)?;
+            let resume = if is_gsi {
+                crate::gsi::shadow_row_key_for_item(
+                    esk,
+                    &key_info.key_schema,
+                    &key_info.base_key_schema,
+                )?
+                .unwrap_or_else(|| {
+                    row_key::encode_key(esk, &key_info.key_schema).unwrap_or_default()
+                })
+            } else {
+                row_key::encode_key(esk, &key_info.key_schema)?
+            };
             if forward {
                 let mut s = resume.clone();
                 s.push(0x00);
@@ -211,17 +241,6 @@ impl<'a> QueryScan<'a> {
         }
 
         let mut data = self.client.data();
-        // bigtable gRPC reversed is supported, but we keep the client-side
-        // reversal for compatibility with the POC logic for now, or we can use the reversed flag?
-        // Wait, CheckAndMutateRow doesn't have reversed, but ReadRows does.
-        // ReadRowsRequest has `reversed: bool`.
-        // Let's check if the tonic-generated ReadRowsRequest has `reversed`.
-        // Actually, we can just do server-side reverse!
-        // But the POC says: "bigtable_rs 0.3 doesn't expose the v2 `reversed` flag — we always
-        // forward-scan and reverse in the client."
-        // Since we are using tonic-generated gRPC code directly, we DO have the `reversed` flag in `ReadRowsRequest`.
-        // However, for simplicity and risk reduction, let's keep the client-side reverse for now as it is proven in the POC,
-        // and we can optimize it later if we want.
         let req = ReadRowsRequest {
             table_name: self.full_table_name.clone(),
             app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
@@ -256,7 +275,22 @@ impl<'a> QueryScan<'a> {
         }
 
         let last_evaluated = match limit {
-            Some(l) if items.len() == l as usize => items.last().cloned(),
+            Some(l) if items.len() == l as usize => items.last().map(|item| {
+                let mut key_attrs: Item = BTreeMap::new();
+                for ks in &key_info.key_schema {
+                    if let Some(v) = item.get(&ks.attribute_name) {
+                        key_attrs.insert(ks.attribute_name.clone(), v.clone());
+                    }
+                }
+                if is_gsi {
+                    for ks in &key_info.base_key_schema {
+                        if let Some(v) = item.get(&ks.attribute_name) {
+                            key_attrs.insert(ks.attribute_name.clone(), v.clone());
+                        }
+                    }
+                }
+                key_attrs
+            }),
             _ => None,
         };
         Ok((items, last_evaluated))
@@ -433,9 +467,22 @@ impl<'a> QueryScan<'a> {
         segment: Option<i64>,
         total_segments: Option<i64>,
     ) -> Result<(Vec<Item>, Option<Item>), StorageError> {
+        let is_gsi =
+            !key_info.base_key_schema.is_empty() && key_info.base_key_schema != key_info.key_schema;
         let start_key = match exclusive_start_key {
             Some(esk) => {
-                let mut k = row_key::encode_key(esk, &key_info.key_schema)?;
+                let mut k = if is_gsi {
+                    crate::gsi::shadow_row_key_for_item(
+                        esk,
+                        &key_info.key_schema,
+                        &key_info.base_key_schema,
+                    )?
+                    .unwrap_or_else(|| {
+                        row_key::encode_key(esk, &key_info.key_schema).unwrap_or_default()
+                    })
+                } else {
+                    row_key::encode_key(esk, &key_info.key_schema)?
+                };
                 k.push(0x00);
                 k
             }
@@ -487,6 +534,13 @@ impl<'a> QueryScan<'a> {
                     for ks in &key_info.key_schema {
                         if let Some(v) = item.get(&ks.attribute_name) {
                             key_attrs.insert(ks.attribute_name.clone(), v.clone());
+                        }
+                    }
+                    if is_gsi {
+                        for ks in &key_info.base_key_schema {
+                            if let Some(v) = item.get(&ks.attribute_name) {
+                                key_attrs.insert(ks.attribute_name.clone(), v.clone());
+                            }
                         }
                     }
                     key_attrs

@@ -205,7 +205,7 @@ impl BigtableEngine {
     }
 
     /// Look up the BigTable data-table short name for a (account, table_name).
-    async fn data_table_for(&self, key_info: &TableKeyInfo) -> Result<String, StorageError> {
+    pub async fn data_table_for(&self, key_info: &TableKeyInfo) -> Result<String, StorageError> {
         let (dt, _) = self.table_meta_for(key_info).await?;
         Ok(dt)
     }
@@ -1425,7 +1425,7 @@ impl DataEngine for BigtableEngine {
                 return Ok(Vec::new());
             }
 
-            // Group by data_table to batch with concurrent metadata resolution.
+            // Group by data_table to batch with concurrent metadata resolution and row-key encoding.
             let resolve_futures =
                 owned
                     .iter()
@@ -1433,72 +1433,114 @@ impl DataEngine for BigtableEngine {
                     .enumerate()
                     .map(|(idx, (key_info, key))| async move {
                         let data_table = self.data_table_for(&key_info).await?;
-                        Ok::<_, StorageError>((idx, data_table, key_info, key))
+                        let enc_key =
+                            crate::data::encoding::row_key::encode_key(&key, &key_info.key_schema)?;
+                        Ok::<_, StorageError>((idx, data_table, key_info, key, enc_key))
                     });
             let resolved_ops = futures::future::try_join_all(resolve_futures).await?;
 
-            let mut grouped: std::collections::HashMap<String, Vec<(usize, TableKeyInfo, Item)>> =
+            type ResolvedOp = (usize, TableKeyInfo, Item, Vec<u8>);
+            let mut grouped: std::collections::HashMap<String, Vec<ResolvedOp>> =
                 std::collections::HashMap::new();
-            for (idx, data_table, key_info, key) in resolved_ops {
+            for (idx, data_table, key_info, key, enc_key) in resolved_ops {
                 grouped
                     .entry(data_table)
                     .or_default()
-                    .push((idx, key_info, key));
+                    .push((idx, key_info, key, enc_key));
             }
 
-            let start_time = std::time::Instant::now();
-            let max_duration = std::time::Duration::from_secs(self.intent_timeout_secs.max(1));
-            let mut backoff = std::time::Duration::from_millis(25);
+            let mut futures = Vec::new();
+            for (data_table, group_ops) in &grouped {
+                let client = self.client.clone();
+                let intent_timeout_secs = self.intent_timeout_secs;
+                let group_ops = group_ops.clone();
+                let data_table = data_table.clone();
+                futures.push(async move {
+                    let ops_helper = ItemOps::new(&client, &data_table, intent_timeout_secs);
+                    if let Some((_, key_info, _, _)) = group_ops.first() {
+                        let keys: Vec<Item> =
+                            group_ops.iter().map(|(_, _, k, _)| k.clone()).collect();
+                        let results = ops_helper
+                            .batch_get_with_intent_check(key_info, &keys)
+                            .await?;
+                        Ok::<_, StorageError>((data_table, group_ops, results))
+                    } else {
+                        Ok::<_, StorageError>((data_table, Vec::new(), Vec::new()))
+                    }
+                });
+            }
 
-            loop {
-                let mut futures = Vec::new();
-                for (data_table, group_ops) in &grouped {
-                    let client = self.client.clone();
-                    let intent_timeout_secs = self.intent_timeout_secs;
-                    let group_ops = group_ops.clone();
-                    let data_table = data_table.clone();
-                    futures.push(async move {
-                        let ops_helper = ItemOps::new(&client, &data_table, intent_timeout_secs);
-                        if let Some((_, key_info, _)) = group_ops.first() {
-                            let keys: Vec<Item> =
-                                group_ops.iter().map(|(_, _, k)| k.clone()).collect();
-                            let (results, has_lock) = ops_helper
-                                .batch_get_with_intent_check(key_info, &keys)
-                                .await?;
-                            Ok::<_, StorageError>((group_ops, results, has_lock))
-                        } else {
-                            Ok::<_, StorageError>((Vec::new(), Vec::new(), false))
+            let group_results = futures::future::try_join_all(futures).await?;
+            let mut out: Vec<Option<Item>> = vec![None; total_ops];
+
+            // Collect active txn_ids that need resolution from the txn log.
+            let mut txn_states: std::collections::HashMap<
+                String,
+                Option<crate::transact::TxnState>,
+            > = std::collections::HashMap::new();
+
+            for (_, _, results) in &group_results {
+                for (_, active_txn_id) in results {
+                    if let Some(tid) = active_txn_id {
+                        txn_states.entry(tid.clone()).or_insert(None);
+                    }
+                }
+            }
+
+            // Fetch coordinator states from __extenddb_txn_log__ for all active txn_ids
+            if !txn_states.is_empty() {
+                let coord = crate::transact::TxnCoordinator::new(
+                    &self.client,
+                    std::time::Duration::from_secs(self.intent_timeout_secs.max(1)),
+                );
+                for tid in txn_states.keys().cloned().collect::<Vec<_>>() {
+                    let state = coord.get_state(&tid).await?;
+                    txn_states.insert(tid, state);
+                }
+            }
+
+            // Apply the snapshot resolution rule for each row:
+            // - Intent present + txn COMMITTED -> serve logged post-image from mutation payloads.
+            // - Intent present + txn PENDING -> serve current d value (apply cannot have started).
+            // - Intent present + other (CLEANED/ABORTED/not found) -> serve current d value.
+            // - Intent absent -> serve current d value.
+            for (data_table, group_ops, results) in group_results {
+                for ((idx, _, _, enc_key), (item_from_d, active_txn_id)) in
+                    group_ops.into_iter().zip(results)
+                {
+                    if let Some(tid) = active_txn_id
+                        && let Some(Some(txn_state)) = txn_states.get(&tid)
+                        && txn_state.state == "COMMITTED"
+                    {
+                        let mut resolved_from_log = false;
+                        if let Some(mutations) = &txn_state.mutations {
+                            for m in mutations {
+                                if m.participant.data_table == data_table
+                                    && m.participant.row_key == enc_key
+                                {
+                                    match &m.payload {
+                                        crate::transact::TxnOpPayload::Put { item } => {
+                                            out[idx] = Some(item.clone());
+                                        }
+                                        crate::transact::TxnOpPayload::Delete => {
+                                            out[idx] = None;
+                                        }
+                                    }
+                                    resolved_from_log = true;
+                                    break;
+                                }
+                            }
                         }
-                    });
-                }
-
-                let group_results = futures::future::try_join_all(futures).await?;
-                let mut conflict = false;
-                let mut out: Vec<Option<Item>> = vec![None; total_ops];
-
-                for (group_ops, results, has_lock) in group_results {
-                    if has_lock {
-                        conflict = true;
-                    }
-                    for ((idx, _, _), item) in group_ops.into_iter().zip(results) {
-                        out[idx] = item;
+                        if !resolved_from_log {
+                            out[idx] = item_from_d;
+                        }
+                    } else {
+                        out[idx] = item_from_d;
                     }
                 }
-
-                if !conflict {
-                    return Ok(out);
-                }
-
-                if start_time.elapsed() >= max_duration {
-                    return Err(StorageError::TransactionConflict(
-                        "TransactGetItems timed out waiting for active intent locks to clear"
-                            .to_string(),
-                    ));
-                }
-
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(std::time::Duration::from_millis(500));
             }
+
+            Ok(out)
         })
     }
 

@@ -85,6 +85,36 @@ fn build_version_match_filter(expected_version: u64) -> RowFilter {
     }
 }
 
+/// Filter matching if row version m:v != expected_version (or m:v is missing).
+fn build_version_mismatch_filter(expected_version: u64) -> RowFilter {
+    RowFilter {
+        filter: Some(Filter::Condition(Box::new(Condition {
+            predicate_filter: Some(Box::new(build_version_match_filter(expected_version))),
+            true_filter: Some(Box::new(RowFilter {
+                filter: Some(Filter::BlockAllFilter(true)),
+            })),
+            false_filter: Some(Box::new(RowFilter {
+                filter: Some(Filter::PassAllFilter(true)),
+            })),
+        }))),
+    }
+}
+
+/// De Morgan conflict filter for existing-row OCC update/delete:
+/// Matches if (active intent exists in m) OR (m:v != expected_version).
+/// When this filter matches (conflict), mutations are skipped.
+/// When this filter does NOT match (no conflict), false_mutations are applied.
+fn build_occ_conflict_filter(cutoff_micros: i64, expected_version: u64) -> RowFilter {
+    RowFilter {
+        filter: Some(Filter::Interleave(Interleave {
+            filters: vec![
+                build_active_intent_filter(cutoff_micros),
+                build_version_mismatch_filter(expected_version),
+            ],
+        })),
+    }
+}
+
 /// Filter matching if active intent exists OR m:v exists OR data family d exists.
 fn build_row_presence_conflict_filter(cutoff_micros: i64) -> RowFilter {
     RowFilter {
@@ -267,16 +297,17 @@ impl<'a> ItemOps<'a> {
         Ok(out)
     }
 
-    /// Read multiple rows into Item maps while checking for active 2PC intent locks in column family `m`.
-    /// Returns (items, has_active_lock).
-    /// If has_active_lock is true, at least one of the requested rows currently has an active intent lock.
+    /// Read multiple rows into Item maps along with any active intent txn_id in column family `m`.
+    /// Returns a vector of tuples: (Option<Item>, Option<String>), where the first element is the
+    /// data item decoded from family `d` (if present), and the second element is the active transaction ID
+    /// if an unexpired intent marker was found in family `m`.
     pub async fn batch_get_with_intent_check(
         &self,
         key_info: &TableKeyInfo,
         keys: &[Item],
-    ) -> Result<(Vec<Option<Item>>, bool), StorageError> {
+    ) -> Result<Vec<(Option<Item>, Option<String>)>, StorageError> {
         if keys.is_empty() {
-            return Ok((Vec::new(), false));
+            return Ok(Vec::new());
         }
         let mut row_keys = Vec::with_capacity(keys.len());
         for k in keys {
@@ -303,11 +334,11 @@ impl<'a> ItemOps<'a> {
         let now_micros = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1000) as i64;
         let cutoff_micros = now_micros - (self.intent_timeout_secs * 1_000_000) as i64;
 
-        let mut row_map = BTreeMap::new();
-        let mut has_active_lock = false;
+        let mut row_map: BTreeMap<Vec<u8>, (Option<Item>, Option<String>)> = BTreeMap::new();
 
         for (rkey, cells) in resp {
             let mut item: Item = BTreeMap::new();
+            let mut active_txn_id: Option<String> = None;
             for c in cells {
                 if c.family_name == FAMILY_DATA {
                     let attr_name = String::from_utf8(c.qualifier)
@@ -317,32 +348,34 @@ impl<'a> ItemOps<'a> {
                 } else if c.family_name == FAMILY_META
                     && c.qualifier.starts_with(QUALIFIER_INTENT_PREFIX)
                     && c.timestamp_micros >= cutoff_micros
+                    && let Ok(qual_str) = std::str::from_utf8(&c.qualifier)
+                    && let Some(tid) = qual_str.strip_prefix("intent:")
                 {
-                    has_active_lock = true;
+                    active_txn_id = Some(tid.to_string());
                 }
             }
-            if !item.is_empty() {
-                row_map.insert(rkey, item);
-            }
+            let item_opt = if item.is_empty() { None } else { Some(item) };
+            row_map.insert(rkey, (item_opt, active_txn_id));
         }
 
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
             let rkey = row_key::encode_key(k, &key_info.key_schema)?;
-            if let Some(item) = row_map.get(&rkey) {
-                out.push(Some(item.clone()));
+            if let Some(entry) = row_map.get(&rkey) {
+                out.push(entry.clone());
             } else {
-                out.push(None);
+                out.push((None, None));
             }
         }
 
-        Ok((out, has_active_lock))
+        Ok(out)
     }
 
     /// Guarded Put: write the item maintaining OCC row version and ensuring no active 2PC lock.
     ///
     /// If `is_conditional` is true and `expected_version` is `Some(v)`, enforces that
-    /// no active intent exists AND `m:v == v`.
+    /// no active intent exists AND `m:v == v` using Bigtable's De Morgan form:
+    /// `(active intent exists in m) OR (m:v != v)` with mutations placed in `false_mutations`.
     /// If `is_conditional` is true and `expected_version` is `None`, enforces that
     /// no active intent exists AND the row does not exist (`m:v` and family `d` do not exist).
     /// If `is_conditional` is false, only enforces that no active intent exists.
@@ -381,24 +414,18 @@ impl<'a> ItemOps<'a> {
 
         if is_conditional {
             if let Some(v) = expected_version {
-                // Updating existing row: predicate matches only when (no active intent) AND (m:v == v).
-                let predicate = RowFilter {
-                    filter: Some(Filter::Condition(Box::new(Condition {
-                        predicate_filter: Some(Box::new(build_active_intent_filter(min_timestamp))),
-                        true_filter: Some(Box::new(RowFilter {
-                            filter: Some(Filter::BlockAllFilter(true)),
-                        })),
-                        false_filter: Some(Box::new(build_version_match_filter(v))),
-                    }))),
-                };
+                // Updating existing row using De Morgan form:
+                // Predicate matches if (active intent exists in m) OR (m:v != v).
+                // Mutations are in false_mutations.
+                let predicate = build_occ_conflict_filter(min_timestamp, v);
 
                 let req = CheckAndMutateRowRequest {
                     table_name: self.full_table_name.clone(),
                     app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
                     row_key,
                     predicate_filter: Some(predicate),
-                    true_mutations: mutations,
-                    false_mutations: vec![],
+                    true_mutations: vec![],
+                    false_mutations: mutations,
                     ..CheckAndMutateRowRequest::default()
                 };
 
@@ -407,7 +434,7 @@ impl<'a> ItemOps<'a> {
                     .await
                     .map_err(|e| StorageError::Internal(format!("CheckAndMutateRow put: {e}")))?;
 
-                if !resp.predicate_matched {
+                if resp.predicate_matched {
                     return Err(StorageError::TransactionConflict(
                         "concurrent transaction holds an intent on this row or row version changed"
                             .to_string(),
@@ -505,24 +532,18 @@ impl<'a> ItemOps<'a> {
 
         if is_conditional {
             if let Some(v) = expected_version {
-                // Deleting existing row: predicate matches only when (no active intent) AND (m:v == v).
-                let predicate = RowFilter {
-                    filter: Some(Filter::Condition(Box::new(Condition {
-                        predicate_filter: Some(Box::new(build_active_intent_filter(min_timestamp))),
-                        true_filter: Some(Box::new(RowFilter {
-                            filter: Some(Filter::BlockAllFilter(true)),
-                        })),
-                        false_filter: Some(Box::new(build_version_match_filter(v))),
-                    }))),
-                };
+                // Deleting existing row using De Morgan form:
+                // Predicate matches if (active intent exists in m) OR (m:v != v).
+                // Mutations are in false_mutations.
+                let predicate = build_occ_conflict_filter(min_timestamp, v);
 
                 let req = CheckAndMutateRowRequest {
                     table_name: self.full_table_name.clone(),
                     app_profile_id: self.client.app_profile_id.clone().unwrap_or_default(),
                     row_key,
                     predicate_filter: Some(predicate),
-                    true_mutations: mutations,
-                    false_mutations: vec![],
+                    true_mutations: vec![],
+                    false_mutations: mutations,
                     ..CheckAndMutateRowRequest::default()
                 };
 
@@ -530,7 +551,7 @@ impl<'a> ItemOps<'a> {
                     StorageError::Internal(format!("CheckAndMutateRow delete: {e}"))
                 })?;
 
-                if !resp.predicate_matched {
+                if resp.predicate_matched {
                     return Err(StorageError::TransactionConflict(
                         "concurrent transaction holds an intent on this row or row version changed"
                             .to_string(),
@@ -768,6 +789,12 @@ mod tests {
 
         let version_filter = build_version_match_filter(42);
         assert!(version_filter.filter.is_some());
+
+        let mismatch_filter = build_version_mismatch_filter(42);
+        assert!(mismatch_filter.filter.is_some());
+
+        let occ_conflict_filter = build_occ_conflict_filter(1000, 42);
+        assert!(occ_conflict_filter.filter.is_some());
 
         let conflict_filter = build_row_presence_conflict_filter(1000);
         assert!(conflict_filter.filter.is_some());

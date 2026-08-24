@@ -1137,12 +1137,318 @@ async fn test_gsi_shadow_table_operations_and_query() {
         .await
         .unwrap();
     assert_eq!(gsi_items_after_del.len(), 0);
+
+    // GSI Sort Key Ordering & BeginsWith test (B3 fix validation)
+    // Put items with sort keys "A", "AB", "B"
+    let str_gsi_table = unique_name("tbl_str_gsi");
+    let str_gsi_name = "CategoryCodeIndex";
+    let str_gsi = GsiInput {
+        index_name: str_gsi_name.to_string(),
+        key_schema: vec![
+            KeySchemaElement {
+                attribute_name: "category".to_string(),
+                key_type: KeyType::Hash,
+            },
+            KeySchemaElement {
+                attribute_name: "code".to_string(),
+                key_type: KeyType::Range,
+            },
+        ],
+        projection: Projection {
+            projection_type: ProjectionType::All,
+            non_key_attributes: None,
+        },
+        provisioned_throughput: None,
+    };
+    let str_input = CreateTableInput {
+        table_name: str_gsi_table.clone(),
+        key_schema: vec![KeySchemaElement {
+            attribute_name: "id".to_string(),
+            key_type: KeyType::Hash,
+        }],
+        attribute_definitions: vec![
+            AttributeDefinition {
+                attribute_name: "id".to_string(),
+                attribute_type: ScalarAttributeType::S,
+            },
+            AttributeDefinition {
+                attribute_name: "category".to_string(),
+                attribute_type: ScalarAttributeType::S,
+            },
+            AttributeDefinition {
+                attribute_name: "code".to_string(),
+                attribute_type: ScalarAttributeType::S,
+            },
+        ],
+        billing_mode: Some(BillingMode::PayPerRequest),
+        provisioned_throughput: None,
+        global_secondary_indexes: Some(vec![str_gsi]),
+        local_secondary_indexes: None,
+        stream_specification: None,
+        sse_specification: None,
+        tags: None,
+        deletion_protection_enabled: Some(false),
+        table_class: None,
+        on_demand_throughput: None,
+    };
+    ctx.engine
+        .create_table(&ctx.account_id, str_input)
+        .await
+        .unwrap();
+    let str_key_info = ctx
+        .engine
+        .table_key_info(&ctx.account_id, &str_gsi_table)
+        .await
+        .unwrap();
+
+    for (id_val, code_val) in [
+        ("id#3", "B"),
+        ("id#1", "A"),
+        ("id#2", "AB"),
+        ("id#4", "ABC"),
+    ] {
+        let mut it: Item = BTreeMap::new();
+        it.insert("id".to_string(), AttributeValue::S(id_val.to_string()));
+        it.insert(
+            "category".to_string(),
+            AttributeValue::S("cat1".to_string()),
+        );
+        it.insert("code".to_string(), AttributeValue::S(code_val.to_string()));
+        ctx.engine
+            .put_item(&str_key_info, it, false, None, &empty_maps, None)
+            .await
+            .unwrap();
+    }
+
+    let mut cat_maps = ExpressionMaps::default();
+    cat_maps
+        .values
+        .insert("cat".to_string(), AttributeValue::S("cat1".to_string()));
+
+    // Query all in partition
+    let cat_kc = parse_kc("category = :cat");
+    let (all_items, _) = ctx
+        .engine
+        .query(
+            &str_key_info,
+            &cat_kc,
+            &cat_maps,
+            true,
+            None,
+            None,
+            Some(str_gsi_name),
+        )
+        .await
+        .unwrap();
+    let codes: Vec<&str> = all_items
+        .iter()
+        .map(|it| match it.get("code").unwrap() {
+            AttributeValue::S(s) => s.as_str(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(
+        codes,
+        vec!["A", "AB", "ABC", "B"],
+        "GSI sort key order must NOT invert 'A' and 'AB'"
+    );
+
+    // Query with begins_with("AB")
+    let mut bw_maps = ExpressionMaps::default();
+    bw_maps
+        .values
+        .insert("cat".to_string(), AttributeValue::S("cat1".to_string()));
+    bw_maps
+        .values
+        .insert("pfx".to_string(), AttributeValue::S("AB".to_string()));
+    let bw_kc = parse_kc("category = :cat AND begins_with(code, :pfx)");
+    let (bw_items, _) = ctx
+        .engine
+        .query(
+            &str_key_info,
+            &bw_kc,
+            &bw_maps,
+            true,
+            None,
+            None,
+            Some(str_gsi_name),
+        )
+        .await
+        .unwrap();
+    let bw_codes: Vec<&str> = bw_items
+        .iter()
+        .map(|it| match it.get("code").unwrap() {
+            AttributeValue::S(s) => s.as_str(),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(bw_codes, vec!["AB", "ABC"]);
+}
+
+// -----------------------------------------------------------------------------
+// Test: TransactGetItems Read-Through-Log Rule
+// -----------------------------------------------------------------------------
+#[tokio::test]
+async fn test_transact_get_items_read_through_log_rule() {
+    let Some(ctx) = setup_emulator_context().await else {
+        eprintln!("Skipping Bigtable test: emulator unavailable");
+        return;
+    };
+
+    let table_name = unique_name("tbl_tget_rule");
+    let input = CreateTableInput {
+        table_name: table_name.clone(),
+        key_schema: vec![KeySchemaElement {
+            attribute_name: "pk".to_string(),
+            key_type: KeyType::Hash,
+        }],
+        attribute_definitions: vec![AttributeDefinition {
+            attribute_name: "pk".to_string(),
+            attribute_type: ScalarAttributeType::S,
+        }],
+        billing_mode: Some(BillingMode::PayPerRequest),
+        provisioned_throughput: None,
+        global_secondary_indexes: None,
+        local_secondary_indexes: None,
+        stream_specification: None,
+        sse_specification: None,
+        tags: None,
+        deletion_protection_enabled: Some(false),
+        table_class: None,
+        on_demand_throughput: None,
+    };
+    ctx.engine
+        .create_table(&ctx.account_id, input)
+        .await
+        .unwrap();
+    let key_info = ctx
+        .engine
+        .table_key_info(&ctx.account_id, &table_name)
+        .await
+        .unwrap();
+    let empty_maps = ExpressionMaps::default();
+
+    // 1. Insert initial items: row1 with value "initial1", row2 with value "initial2"
+    let mut item1: Item = BTreeMap::new();
+    item1.insert("pk".to_string(), AttributeValue::S("row1".to_string()));
+    item1.insert("val".to_string(), AttributeValue::S("initial1".to_string()));
+    ctx.engine
+        .put_item(&key_info, item1.clone(), false, None, &empty_maps, None)
+        .await
+        .unwrap();
+
+    let mut item2: Item = BTreeMap::new();
+    item2.insert("pk".to_string(), AttributeValue::S("row2".to_string()));
+    item2.insert("val".to_string(), AttributeValue::S("initial2".to_string()));
+    ctx.engine
+        .put_item(&key_info, item2.clone(), false, None, &empty_maps, None)
+        .await
+        .unwrap();
+
+    let data_table = ctx.engine.data_table_for(&key_info).await.unwrap();
+    let enc_key1 = extenddb_storage_bigtable::data::encoding::row_key::encode_key(
+        &item1,
+        &key_info.key_schema,
+    )
+    .unwrap();
+    let enc_key2 = extenddb_storage_bigtable::data::encoding::row_key::encode_key(
+        &item2,
+        &key_info.key_schema,
+    )
+    .unwrap();
+
+    let coord = extenddb_storage_bigtable::transact::TxnCoordinator::new(
+        ctx.engine.client_ref(),
+        std::time::Duration::from_secs(60),
+    );
+
+    // Case A: Active intent on row1 with txn in COMMITTED state
+    // Post-image in log for row1: val = "committed_update"
+    let txn_id_committed = "txn-test-committed-123";
+    let part1 = extenddb_storage_bigtable::transact::ParticipantRow {
+        data_table: data_table.clone(),
+        row_key: enc_key1.clone(),
+    };
+    coord
+        .open(txn_id_committed, &[part1.clone()])
+        .await
+        .unwrap();
+    coord.place_intent(txn_id_committed, &part1).await.unwrap();
+
+    let mut committed_item1 = item1.clone();
+    committed_item1.insert(
+        "val".to_string(),
+        AttributeValue::S("committed_update".to_string()),
+    );
+    let mut_payload = vec![extenddb_storage_bigtable::transact::ParticipantMutation {
+        participant: part1.clone(),
+        payload: extenddb_storage_bigtable::transact::TxnOpPayload::Put {
+            item: committed_item1.clone(),
+        },
+        new_version: Some(2),
+    }];
+    coord
+        .commit(txn_id_committed, &mut_payload, None)
+        .await
+        .unwrap();
+
+    // Case B: Active intent on row2 with txn in PENDING state
+    let txn_id_pending = "txn-test-pending-456";
+    let part2 = extenddb_storage_bigtable::transact::ParticipantRow {
+        data_table: data_table.clone(),
+        row_key: enc_key2.clone(),
+    };
+    coord.open(txn_id_pending, &[part2.clone()]).await.unwrap();
+    coord.place_intent(txn_id_pending, &part2).await.unwrap();
+
+    // Execute TransactGetItems on both row1 and row2
+    let mut k1: Item = BTreeMap::new();
+    k1.insert("pk".to_string(), AttributeValue::S("row1".to_string()));
+    let mut k2: Item = BTreeMap::new();
+    k2.insert("pk".to_string(), AttributeValue::S("row2".to_string()));
+
+    let op1 = TransactGetOp {
+        key_info: &key_info,
+        key: &k1,
+    };
+    let op2 = TransactGetOp {
+        key_info: &key_info,
+        key: &k2,
+    };
+
+    let results = ctx
+        .engine
+        .transact_get_items(&[op1, op2])
+        .await
+        .expect("transact_get_items must succeed");
+
+    assert_eq!(results.len(), 2);
+    // Row 1 (COMMITTED intent) -> must return post-image from log ("committed_update")
+    assert_eq!(
+        results[0].as_ref().and_then(|it| it.get("val")),
+        Some(&AttributeValue::S("committed_update".to_string())),
+        "TransactGetItems must serve logged post-image for COMMITTED transaction"
+    );
+
+    // Row 2 (PENDING intent) -> must return pre-image current d value ("initial2")
+    assert_eq!(
+        results[1].as_ref().and_then(|it| it.get("val")),
+        Some(&AttributeValue::S("initial2".to_string())),
+        "TransactGetItems must serve current d value for PENDING transaction"
+    );
+
+    // Clean up intents and txn rows
+    let _ = coord.clear_intent(txn_id_committed, &part1).await;
+    let _ = coord.drop(txn_id_committed).await;
+    let _ = coord.clear_intent(txn_id_pending, &part2).await;
+    let _ = coord.drop(txn_id_pending).await;
 }
 
 // -----------------------------------------------------------------------------
 // Test 6: TTL Index Maintenance & Sweep
 // -----------------------------------------------------------------------------
 #[tokio::test]
+
 async fn test_ttl_index_operations() {
     let Some(ctx) = setup_emulator_context().await else {
         eprintln!("Skipping Bigtable test: emulator unavailable");
